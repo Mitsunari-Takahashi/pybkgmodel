@@ -28,7 +28,8 @@ from pybkgmodel.camera import RectangularCameraImage
 #   acceptance shape); sigma0/delta_sigma set its energy-dependent width.
 # a0, delta_a: linear function of y; a0/delta_a set its energy-dependent
 #   slope.
-# norm, e0, alpha, beta: log-parabola function of energy.
+# norm, e0, alpha: log-parabola function of energy (beta fixed to 0,
+#   i.e. a plain power law for now).
 # eth, s: low-energy cutoff function of energy.
 def default_camera_response_guess(bkg_map):
     """
@@ -50,10 +51,8 @@ def default_camera_response_guess(bkg_map):
         Bounds for the fit parameters.
     """
     x_range = (bkg_map.xedges.max() - bkg_map.xedges.min()).to_value(u.deg)
-    e_min = bkg_map.energy_edges.min()
-    e_max = bkg_map.energy_edges.max()
-    e0_guess = np.sqrt(e_min * e_max).to_value(u.TeV)
-    eth_guess = e_min.to_value(u.TeV)
+    e0_guess = 1.0
+    eth_guess = 0.1
 
     sigma0 = x_range / 4
     delta_sigma0 = 0.0
@@ -63,7 +62,6 @@ def default_camera_response_guess(bkg_map):
     a0 = 0.0
     delta_a0 = 0.0
     alpha0 = 2.0
-    beta0 = 0.1
     s0 = 2.0
 
     # Rough normalization guess, so that the model peak count matches
@@ -80,7 +78,7 @@ def default_camera_response_guess(bkg_map):
     p0 = [
         sigma0, delta_sigma0, gamma0, ecc0, phi0,
         a0, delta_a0,
-        norm0, e0_guess, alpha0, beta0,
+        norm0, e0_guess, alpha0,
         eth_guess, s0
     ]
 
@@ -95,12 +93,21 @@ def default_camera_response_guess(bkg_map):
         (norm0 / 1e3, norm0 * 1e3),        # norm
         (e0_guess * 0.99, e0_guess * 1.01),  # e0 (effectively fixed)
         (-2.0, 5.0),                       # alpha
-        (-2.0, 2.0),                       # beta
         (eth_guess * 0.3, eth_guess * 3),  # eth
         (0.3, 10.0),                       # s
     ]
 
     return p0, bounds
+
+# Names of the camera_response() fit parameters, in the same order as
+# p0/bounds above (and as result.x from fit_camera_response() /
+# fitted_differential_rate()); used to label the printed fit output.
+CAMERA_RESPONSE_PARAM_NAMES = (
+    'sigma0', 'delta_sigma', 'gamma', 'ecc', 'phi',
+    'a0', 'delta_a',
+    'norm', 'e0', 'alpha',
+    'eth', 's',
+)
 
 # list of class attributes, which have a unit assigned
 quantity_list = [
@@ -499,11 +506,15 @@ class BkgMakerBase:
                     dnde = None
                     fit_result = None
 
-            if dnde is None:
+            if fit_result is None:
                 message(
                     f"camera_response fit did not converge for '{key}'; "
                     "falling back to the raw counts-based background rate."
                 )
+            else:
+                message(f"Best-fit camera_response parameters for '{key}':")
+                for name, val in zip(CAMERA_RESPONSE_PARAM_NAMES, fit_result.x):
+                    print(f"    {name:12s} = {val: .6g}")
 
             base_path, _ = os.path.splitext(key)
             BkgMakerBase.save_diagnostic_plots(bkg_map, base_path, result=fit_result)

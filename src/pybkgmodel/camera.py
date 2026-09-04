@@ -134,7 +134,7 @@ def low_energy_cutoff(e, eth, s):
     return np.exp(-np.power(eth/e, s))
 
 
-def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, norm, e0, alpha, beta, eth, s):
+def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, norm, e0, alpha, eth, s):
     """
     Camera background response model, defined as the product of:
     1. a 2D King function of (x, y),
@@ -146,6 +146,12 @@ def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, 
     (see linear()), so that norm alone carries the overall
     normalization of the model; this removes the degeneracy that would
     otherwise exist between norm and the linear function's intercept.
+
+    The log-parabola's curvature term beta is fixed to 0, reducing it
+    to a plain power law (with the low-energy cutoff below still
+    applied); this is a simpler, more easily fit starting point than
+    the full log-parabola. Pass beta explicitly to log_parabola()
+    directly if the curvature term is needed.
 
     x, y and e are not fully separable: the King function's width and
     the linear function's slope are each allowed to vary with energy
@@ -172,8 +178,9 @@ def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, 
         Parameters of the linear function of y, see linear().
         a0 is the slope at e = e0, and delta_a its power-law energy
         dependence (see above).
-    norm, e0, alpha, beta: array_like
-        Parameters of the log-parabola function of e, see log_parabola().
+    norm, e0, alpha: array_like
+        Parameters of the log-parabola function of e, see log_parabola()
+        (beta is fixed to 0, see above).
     eth, s: array_like
         Parameters of the low-energy cutoff function of e, see low_energy_cutoff().
 
@@ -188,7 +195,7 @@ def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, 
     return (
         king_function(x, y, sigma, gamma, ecc=ecc, phi=phi)
         * linear(y, a)
-        * log_parabola(e, norm, e0, alpha, beta)
+        * log_parabola(e, norm, e0, alpha, beta=0.0)
         * low_energy_cutoff(e, eth, s)
     )
 
@@ -529,7 +536,7 @@ f"""{type(self).__name__} instance
         p0: array_like
             Initial guess for the camera_response() fit parameters
             (sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, norm, e0,
-            alpha, beta, eth, s).
+            alpha, eth, s).
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
             in degrees and TeV respectively.
