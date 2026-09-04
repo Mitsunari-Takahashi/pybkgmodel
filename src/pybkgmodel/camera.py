@@ -10,6 +10,189 @@ from astropy.coordinates import SkyCoord, Angle
 from matplotlib import pyplot
 
 
+def king_function(x, y, sigma, gamma, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
+    """
+    2D King function (a generalization of a 2D Gaussian), commonly used
+    to model the point spread function shape in the camera plane.
+    In the gamma -> infinity limit this reduces to a 2D Gaussian with
+    standard deviation sigma, elongated into an ellipse of eccentricity
+    ecc, whose major axis is rotated by the angle phi with respect to
+    the x axis.
+
+    Parameters
+    ----------
+    x, y: array_like
+        Camera plane coordinates.
+    sigma: array_like
+        Width parameter of the King function, i.e. the geometric mean
+        of the widths along the two ellipse axes.
+    gamma: array_like
+        Tail parameter of the King function.
+    ecc: array_like
+        Eccentricity (flattening) of the King function, 0 <= ecc < 1.
+        ecc = 0 corresponds to the circularly symmetric King function.
+    phi: array_like
+        Rotation angle (in radians) of the ellipse major axis with
+        respect to the x axis. Defaults to 0.
+    x0, y0: array_like
+        Center of the King function. Defaults to 0.
+
+    Returns
+    -------
+    val: array_like
+        King function value.
+    """
+    dx = x - x0
+    dy = y - y0
+
+    cphi = np.cos(phi)
+    sphi = np.sin(phi)
+
+    x_rot = dx*cphi + dy*sphi
+    y_rot = -dx*sphi + dy*cphi
+
+    sigma_x = sigma / np.sqrt(1 - ecc)
+    sigma_y = sigma * np.sqrt(1 - ecc)
+
+    r2 = (x_rot/sigma_x)**2 + (y_rot/sigma_y)**2
+
+    return (1 - 1/gamma) / (2*np.pi*sigma_x*sigma_y) * np.power(1 + r2/(2*gamma), -gamma)
+
+
+def linear(y, a, b=1.0):
+    """
+    Linear function of y.
+
+    b defaults to 1 because, inside camera_response(), the overall
+    normalization of linear(y, a, b) * norm is degenerate between b and
+    norm (b, norm) -> (b/k, norm*k) leaves the product unchanged. Fixing
+    b = 1 removes that redundant degree of freedom, leaving norm as the
+    sole overall normalization and a as the (now identifiable) relative
+    slope.
+
+    Parameters
+    ----------
+    y: array_like
+        Independent variable.
+    a: array_like
+        Slope.
+    b: array_like
+        Intercept. Defaults to 1.
+
+    Returns
+    -------
+    val: array_like
+        a*y + b
+    """
+    return a*y + b
+
+
+def log_parabola(e, norm, e0, alpha, beta):
+    """
+    Log-parabola function of energy.
+
+    Parameters
+    ----------
+    e: array_like
+        Energy.
+    norm: array_like
+        Normalization, i.e. the value at e = e0.
+    e0: array_like
+        Reference energy.
+    alpha: array_like
+        Spectral index at e = e0.
+    beta: array_like
+        Curvature parameter.
+
+    Returns
+    -------
+    val: array_like
+        norm * (e/e0)**(-alpha - beta*log(e/e0))
+    """
+    return norm * np.power(e/e0, -alpha - beta*np.log(e/e0))
+
+
+def low_energy_cutoff(e, eth, s):
+    """
+    Exponential cutoff function that suppresses the value at low energies,
+    i.e. it goes to 0 as e -> 0 and to 1 as e -> infinity.
+
+    Parameters
+    ----------
+    e: array_like
+        Energy.
+    eth: array_like
+        Threshold energy scale of the cutoff.
+    s: array_like
+        Steepness of the cutoff.
+
+    Returns
+    -------
+    val: array_like
+        exp(-(eth/e)**s)
+    """
+    return np.exp(-np.power(eth/e, s))
+
+
+def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, norm, e0, alpha, beta, eth, s):
+    """
+    Camera background response model, defined as the product of:
+    1. a 2D King function of (x, y),
+    2. a linear function of y,
+    3. a log-parabola function of e,
+    4. a low-energy exponential cutoff function of e.
+
+    The linear function of y is used with its intercept fixed to 1
+    (see linear()), so that norm alone carries the overall
+    normalization of the model; this removes the degeneracy that would
+    otherwise exist between norm and the linear function's intercept.
+
+    x, y and e are not fully separable: the King function's width and
+    the linear function's slope are each allowed to vary with energy
+    through a power law,
+
+        sigma(e) = sigma0 * (e/e0)**delta_sigma
+        a(e)     = a0     * (e/e0)**delta_a
+
+    which is the lowest-order (linear in log(e/e0)) energy dependence
+    compatible with sigma(e) > 0 at all energies. delta_sigma = 0 and
+    delta_a = 0 recover the fully separable model.
+
+    Parameters
+    ----------
+    x, y: array_like
+        Camera plane coordinates.
+    e: array_like
+        Energy.
+    sigma0, delta_sigma, gamma, ecc, phi: array_like
+        Parameters of the 2D King function, see king_function().
+        sigma0 is the King function width at e = e0, and delta_sigma
+        its power-law energy dependence (see above).
+    a0, delta_a: array_like
+        Parameters of the linear function of y, see linear().
+        a0 is the slope at e = e0, and delta_a its power-law energy
+        dependence (see above).
+    norm, e0, alpha, beta: array_like
+        Parameters of the log-parabola function of e, see log_parabola().
+    eth, s: array_like
+        Parameters of the low-energy cutoff function of e, see low_energy_cutoff().
+
+    Returns
+    -------
+    val: array_like
+        Camera response value.
+    """
+    sigma = sigma0 * np.power(e/e0, delta_sigma)
+    a = a0 * np.power(e/e0, delta_a)
+
+    return (
+        king_function(x, y, sigma, gamma, ecc=ecc, phi=phi)
+        * linear(y, a)
+        * log_parabola(e, norm, e0, alpha, beta)
+        * low_energy_cutoff(e, eth, s)
+    )
+
+
 def solid_angle_lat_lon_rectangle(theta_E, theta_W, phi_N, phi_S):
     """
     Calculate the solid angle of a latitude-longitude rectangle on a globe.
@@ -287,6 +470,234 @@ f"""{type(self).__name__} instance
 
         return dnde
 
+    def fitted_differential_rate(self, p0, bounds=None, index=-2, method='L-BFGS-B', **kwargs):
+        """
+        Same as differential_rate(index=index), but based on a smooth
+        camera_response() fit to the observed counts (see
+        fit_camera_response()) instead of on the observed counts
+        themselves. Produces a statistically smoothed background rate
+        map, free of the Poisson noise of the raw counts.
+
+        Parameters
+        ----------
+        p0: array_like
+            Initial guess for the camera_response() fit parameters,
+            see fit_camera_response().
+        bounds: sequence of (min, max), optional
+            Bounds on the fit parameters, see fit_camera_response().
+        index: float
+            Power law spectral index used to convert the integrated,
+            per-bin model counts into a differential rate, see
+            differential_rate(). Defaults to -2.
+        method: str
+            Optimization method, see fit_camera_response().
+        **kwargs:
+            Any additional keyword arguments are passed to
+            fit_camera_response().
+
+        Returns
+        -------
+        dnde: array_like astropy.unit.Quantity
+            Fitted differential rate, of the same shape as the camera
+            image, see differential_rate().
+        result: scipy.optimize.OptimizeResult
+            Result of the underlying fit_camera_response() call.
+        """
+        result = self.fit_camera_response(p0, bounds=bounds, method=method, **kwargs)
+
+        emin = self.energy_edges[:-1]
+        emax = self.energy_edges[1:]
+        e0 = (emin * emax)**0.5
+        int2diff = (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
+
+        rate = result.model_counts / self.raw_exposure / self.pixel_area
+        dnde = rate * int2diff[:, None, None]
+
+        return dnde, result
+
+    def fit_camera_response(self, p0, bounds=None, method='L-BFGS-B', **kwargs):
+        """
+        Fit the product of camera_response() and the exposure map to the
+        observed counts, assuming the counts follow Poisson statistics
+        (i.e. minimizing the C-stat, see cstat()).
+
+        Only the unmasked pixels (see mask, mask_half(), mask_region())
+        are included in the fit.
+
+        Parameters
+        ----------
+        p0: array_like
+            Initial guess for the camera_response() fit parameters
+            (sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, norm, e0,
+            alpha, beta, eth, s).
+            x, y and e (camera coordinates and energy) are not fitted:
+            they are set to the pixel / energy bin centers of this image,
+            in degrees and TeV respectively.
+        bounds: sequence of (min, max), optional
+            Bounds on the fit parameters, passed to scipy.optimize.minimize.
+        method: str
+            Optimization method, passed to scipy.optimize.minimize.
+            Defaults to 'L-BFGS-B', which supports bounds. Note that the
+            fit parameters can differ by orders of magnitude in scale
+            (e.g. norm vs. ecc), which can make gradient-based methods
+            converge poorly with their default numerical-differentiation
+            step size; passing scipy's `finite_diff_rel_step` keyword
+            argument, rescaling p0/bounds, or using a gradient-free
+            method (e.g. 'Nelder-Mead') can help in that case.
+        **kwargs:
+            Any additional keyword arguments are passed to
+            scipy.optimize.minimize.
+
+        Returns
+        -------
+        result: scipy.optimize.OptimizeResult
+            Result of the fit. result.x contains the best fit parameters,
+            in the same order as p0. result.model_counts is the fitted
+            camera_response(), multiplied by the exposure, evaluated on
+            the pixel / energy bin centers of this image: a smooth count
+            map of the same shape as CameraImage.counts.
+        """
+        x = ((self.xedges[1:] + self.xedges[:-1]) / 2).to_value(u.deg)
+        y = ((self.yedges[1:] + self.yedges[:-1]) / 2).to_value(u.deg)
+        e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(u.TeV)
+
+        ee, xx, yy = np.meshgrid(e, x, y, indexing='ij')
+
+        exposure = self.raw_exposure.to_value(u.s)
+        counts = self.raw_counts
+        mask = np.broadcast_to(self.mask, counts.shape)
+
+        def neg_log_likelihood(params):
+            model_counts = camera_response(xx, yy, ee, *params) * exposure
+            return cstat(counts[mask], model_counts[mask])
+
+        result = scipy.optimize.minimize(
+            neg_log_likelihood,
+            x0=p0,
+            bounds=bounds,
+            method=method,
+            **kwargs
+        )
+
+        result.model_counts = camera_response(xx, yy, ee, *result.x) * exposure
+
+        return result
+
+    def plot_fit_check(self, result, energy_bin_id=0, ax_unit='deg', cmap='viridis'):
+        """
+        Plot a spatial comparison between the observed counts and the
+        counts predicted by a camera_response() fit (see
+        fit_camera_response()), for one energy bin, as a visual check
+        of the fit quality.
+
+        Produces three panels: the observed counts, the fitted model
+        counts and the residuals, expressed as Poisson-equivalent
+        Gaussian pulls (data - model) / sqrt(model). Masked pixels
+        (see mask, mask_half(), mask_region()) are left blank.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), must have a model_counts
+            attribute of the same shape as CameraImage.counts.
+        energy_bin_id: int
+            Energy bin to plot.
+        ax_unit: str
+            Unit to use for the x/y axes.
+        cmap: str
+            Colormap to use for the data/model count maps.
+
+        Returns
+        -------
+        fig, axes: matplotlib figure and array of 3 axes
+            (data, model, pull).
+        """
+        mask = self.mask
+        data = self.counts[energy_bin_id]
+        model = result.model_counts[energy_bin_id] * mask
+
+        pull = np.full(data.shape, np.nan)
+        pull[mask] = (data[mask] - model[mask]) / np.sqrt(model[mask])
+
+        xedges = self.xedges.to_value(ax_unit)
+        yedges = self.yedges.to_value(ax_unit)
+
+        vmax = max(data.max(), model.max())
+        pmax = np.nanmax(np.abs(pull)) if np.any(mask) else 1
+
+        fig, axes = pyplot.subplots(1, 3, figsize=(15, 4))
+
+        for ax, val, title, kwargs in zip(
+            axes,
+            (data, model, pull),
+            ('Data counts', 'Model counts', 'Pull: (data - model) / sqrt(model)'),
+            (
+                dict(vmin=0, vmax=vmax, cmap=cmap),
+                dict(vmin=0, vmax=vmax, cmap=cmap),
+                dict(vmin=-pmax, vmax=pmax, cmap='coolwarm')
+            )
+        ):
+            im = ax.pcolormesh(xedges, yedges, val.transpose(), **kwargs)
+            ax.set_title(title)
+            ax.set_xlabel(f'X [{ax_unit}]')
+            ax.set_ylabel(f'Y [{ax_unit}]')
+            fig.colorbar(im, ax=ax)
+
+        emin = self.energy_edges[energy_bin_id]
+        emax = self.energy_edges[energy_bin_id + 1]
+        fig.suptitle(f'Energy bin {energy_bin_id}: [{emin:.2f}, {emax:.2f}]')
+        fig.tight_layout()
+
+        return fig, axes
+
+    def plot_fit_spectrum(self, result, e_unit='TeV'):
+        """
+        Plot the observed vs. fitted (model) counts, summed over all
+        unmasked pixels, as a function of energy, together with the
+        residuals (pulls), as a check of the fit quality across the
+        whole energy range.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), must have a model_counts
+            attribute of the same shape as CameraImage.counts.
+        e_unit: str
+            Unit to use for the energy axis.
+
+        Returns
+        -------
+        fig, (ax_spec, ax_pull): matplotlib figure and axes
+            (count spectrum, pull).
+        """
+        data = self.counts.sum(axis=(1, 2))
+        model = (result.model_counts * self.mask).sum(axis=(1, 2))
+
+        e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(e_unit)
+        data_err = np.sqrt(data)
+        pull = (data - model) / np.sqrt(model)
+
+        fig, (ax_spec, ax_pull) = pyplot.subplots(
+            2, 1, sharex=True, figsize=(6, 6),
+            gridspec_kw=dict(height_ratios=[3, 1])
+        )
+
+        ax_spec.errorbar(e, data, yerr=data_err, fmt='o', color='k', label='Data')
+        ax_spec.plot(e, model, '-', color='C1', label='Model')
+        ax_spec.set_xscale('log')
+        ax_spec.set_yscale('log')
+        ax_spec.set_ylabel('Counts')
+        ax_spec.legend()
+
+        ax_pull.axhline(0, color='gray', ls='--')
+        ax_pull.plot(e, pull, 'o', color='k')
+        ax_pull.set_xlabel(f'Energy [{e_unit}]')
+        ax_pull.set_ylabel('Pull')
+
+        fig.tight_layout()
+
+        return fig, (ax_spec, ax_pull)
+
     def mask_half(self, pointer):
         """Excludes the half of the camera containing the sources.
 
@@ -338,7 +749,7 @@ f"""{type(self).__name__} instance
         pyplot.pcolormesh(
             self.xedges.to(ax_unit).value,
             self.yedges.to(ax_unit).value,
-            (self.counts[energy_bin_id] / self.raw_exposure).to(val_unit).transpose(),
+            (self.counts[energy_bin_id] / self.raw_exposure).to_value(val_unit).transpose(),
             **kwargs
         )
         pyplot.colorbar(label=f'rate [{val_unit}]')
@@ -397,7 +808,24 @@ class RectangularCameraImage(CameraImage):
 
         return area
 
-    def to_hdu(self, name='BACKGROUND'):
+    def to_hdu(self, name='BACKGROUND', bkg_rate=None):
+        """
+        Parameters
+        ----------
+        name: str
+            Name of the output HDU.
+        bkg_rate: array_like astropy.unit.Quantity, optional
+            Differential background rate to write out, of the same
+            shape as differential_rate(). If None (default), it is
+            computed on the fly as differential_rate(index=-2), i.e.
+            directly from the (noisy) observed counts. Pass e.g. the
+            dnde array returned by fitted_differential_rate() to write
+            out a smooth, fit-based background model instead.
+
+        Returns
+        -------
+        hdu: astropy.io.fits.BinTableHDU
+        """
         energ_lo = self.energy_edges[:-1]
         energ_hi = self.energy_edges[1:]
 
@@ -407,7 +835,8 @@ class RectangularCameraImage(CameraImage):
         dety_lo = self.yedges[:-1]
         dety_hi = self.yedges[1:]
 
-        bkg_rate = self.differential_rate(index=-2)
+        if bkg_rate is None:
+            bkg_rate = self.differential_rate(index=-2)
 
         col_energ_lo = pyfits.Column(name='ENERG_LO', unit='TeV', format=f'{energ_lo.size}E', array=[energ_lo])
         col_energ_hi = pyfits.Column(name='ENERG_HI', unit='TeV', format=f'{energ_hi.size}E', array=[energ_hi])
