@@ -24,7 +24,7 @@ from pybkgmodel.camera import RectangularCameraImage
 
 # Order of the camera_response() fit parameters, as expected by
 # CameraImage.fit_camera_response() / fitted_differential_rate().
-# sigma0, delta_sigma, gamma, ecc, phi: 2D King function (camera
+# sigma0, delta_sigma, p, ecc, phi: 2D super-Gaussian function (camera
 #   acceptance shape); sigma0/delta_sigma set its energy-dependent width.
 # (the linear function of y has both its slope and intercept fixed,
 #   i.e. no y-dependence, for now; see camera_response())
@@ -53,7 +53,7 @@ def default_camera_response_guess(bkg_map):
 
     sigma0 = x_range / 4
     delta_sigma0 = 0.0
-    gamma0 = 1000.0
+    p0_shape = 1.0
     ecc0 = 0.0
     phi0 = 0.0
     alpha0 = 1.7
@@ -63,21 +63,22 @@ def default_camera_response_guess(bkg_map):
     # the observed peak count for the initial guess of the shape
     # parameters above (sigma(e0) = sigma0). The linear(y) function's
     # intercept is fixed to 1 inside camera_response() (see linear()),
-    # so it does not enter here.
-    king_peak = (1 - 1/gamma0) / (2 * np.pi * sigma0**2)
+    # so it does not enter here. At p0_shape = 1 the super-Gaussian is
+    # an ordinary Gaussian, whose peak value is 1/(2*pi*sigma0**2).
+    gauss_peak = 1 / (2 * np.pi * sigma0**2)
     exposure0 = bkg_map.raw_exposure[bkg_map.mask].mean().to_value(u.s)
     counts_peak = bkg_map.raw_counts.max()
-    norm0 = max(counts_peak / max(king_peak * exposure0, 1e-30), 1e-10)
+    norm0 = max(counts_peak / max(gauss_peak * exposure0, 1e-30), 1e-10)
 
     p0 = [
-        sigma0, delta_sigma0, gamma0, ecc0, phi0,
+        sigma0, delta_sigma0, p0_shape, ecc0, phi0,
         norm0, e0_guess, alpha0, beta0,
     ]
 
     bounds = [
         (sigma0 / 10, sigma0 * 10),        # sigma0
         (-3.0, 3.0),                       # delta_sigma
-        (1.01, 10000.0),                      # gamma
+        (0.3, 5.0),                        # p (shape's flatness exponent)
         (0.0, 0.9),                        # ecc
         (-np.pi / 2, np.pi / 2),           # phi
         (norm0 / 1e3, norm0 * 1e3),        # norm
@@ -92,7 +93,7 @@ def default_camera_response_guess(bkg_map):
 # p0/bounds above (and as result.x from fit_camera_response() /
 # fitted_differential_rate()); used to label the printed fit output.
 CAMERA_RESPONSE_PARAM_NAMES = (
-    'sigma0', 'delta_sigma', 'gamma', 'ecc', 'phi',
+    'sigma0', 'delta_sigma', 'p', 'ecc', 'phi',
     'norm', 'e0', 'alpha', 'beta',
 )
 

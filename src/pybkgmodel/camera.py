@@ -59,6 +59,65 @@ def king_function(x, y, sigma, gamma, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
     return (1 - 1/gamma) / (2*np.pi*sigma_x*sigma_y) * np.power(1 + r2/(2*gamma), -gamma)
 
 
+def super_gaussian(x, y, sigma, p, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
+    """
+    2D super-Gaussian function, a generalization of a 2D Gaussian with
+    a tunable flatness at the center, elongated into an ellipse of
+    eccentricity ecc, whose major axis is rotated by the angle phi
+    with respect to the x axis.
+
+    p = 1 recovers an ordinary 2D Gaussian of standard deviation
+    sigma. p > 1 flattens the peak into a plateau near the center
+    (with a steeper falloff further out, unlike king_function()'s
+    power-law tail, this one always falls off exponentially); p < 1
+    gives a sharper (more cusped) peak than a Gaussian.
+
+    Parameters
+    ----------
+    x, y: array_like
+        Camera plane coordinates.
+    sigma: array_like
+        Width parameter, i.e. the geometric mean of the widths along
+        the two ellipse axes.
+    p: array_like
+        Flatness exponent, p > 0. p = 1 is a standard Gaussian; p > 1
+        flattens the center into a plateau.
+    ecc: array_like
+        Eccentricity (flattening), 0 <= ecc < 1. ecc = 0 corresponds
+        to the circularly symmetric function. Defaults to 0.
+    phi: array_like
+        Rotation angle (in radians) of the ellipse major axis with
+        respect to the x axis. Defaults to 0.
+    x0, y0: array_like
+        Center. Defaults to 0.
+
+    Returns
+    -------
+    val: array_like
+        Super-Gaussian function value.
+    """
+    dx = x - x0
+    dy = y - y0
+
+    cphi = np.cos(phi)
+    sphi = np.sin(phi)
+
+    x_rot = dx*cphi + dy*sphi
+    y_rot = -dx*sphi + dy*cphi
+
+    sigma_x = sigma / np.sqrt(1 - ecc)
+    sigma_y = sigma * np.sqrt(1 - ecc)
+
+    r2 = (x_rot/sigma_x)**2 + (y_rot/sigma_y)**2
+
+    # Exact 2D normalization for the elliptical super-Gaussian; reduces
+    # to the usual 1/(2*pi*sigma_x*sigma_y) Gaussian normalization at
+    # p = 1 (scipy.special.gamma(1) = 1).
+    prefactor = p / (2*np.pi*sigma_x*sigma_y*scipy.special.gamma(1/p))
+
+    return prefactor * np.exp(-np.power(r2/2, p))
+
+
 def linear(y, a, b=1.0):
     """
     Linear function of y.
@@ -134,10 +193,10 @@ def low_energy_cutoff(e, eth, s):
     return np.exp(-np.power(eth/e, s))
 
 
-def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, norm, e0, alpha, beta):
+def camera_response(x, y, e, sigma0, delta_sigma, p, ecc, phi, norm, e0, alpha, beta):
     """
     Camera background response model, defined as the product of:
-    1. a 2D King function of (x, y),
+    1. a 2D super-Gaussian function of (x, y),
     2. a linear function of y,
     3. a log-parabola function of e.
 
@@ -147,7 +206,7 @@ def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, norm, e0, alp
     stable. Pass a explicitly to linear() directly if the y-dependence
     is needed again.
 
-    x and e are not fully separable: the King function's width is
+    x and e are not fully separable: the super-Gaussian's width is
     allowed to vary with energy through a power law,
 
         sigma(e) = sigma0 * (e/e0)**delta_sigma
@@ -162,10 +221,10 @@ def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, norm, e0, alp
         Camera plane coordinates.
     e: array_like
         Energy.
-    sigma0, delta_sigma, gamma, ecc, phi: array_like
-        Parameters of the 2D King function, see king_function().
-        sigma0 is the King function width at e = e0, and delta_sigma
-        its power-law energy dependence (see above).
+    sigma0, delta_sigma, p, ecc, phi: array_like
+        Parameters of the 2D super-Gaussian function, see
+        super_gaussian(). sigma0 is its width at e = e0, and
+        delta_sigma its power-law energy dependence (see above).
     norm, e0, alpha, beta: array_like
         Parameters of the log-parabola function of e, see log_parabola().
 
@@ -177,7 +236,7 @@ def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, norm, e0, alp
     sigma = sigma0 * np.power(e/e0, delta_sigma)
 
     return (
-        king_function(x, y, sigma, gamma, ecc=ecc, phi=phi)
+        super_gaussian(x, y, sigma, p, ecc=ecc, phi=phi)
         * linear(y, a=0.0)
         * log_parabola(e, norm, e0, alpha, beta)
     )
@@ -526,7 +585,7 @@ f"""{type(self).__name__} instance
         ----------
         p0: array_like
             Initial guess for the camera_response() fit parameters
-            (sigma0, delta_sigma, gamma, ecc, phi, norm, e0, alpha,
+            (sigma0, delta_sigma, p, ecc, phi, norm, e0, alpha,
             beta).
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
@@ -740,12 +799,10 @@ f"""{type(self).__name__} instance
         energy bin, as a visual check of the fit quality.
 
         Produces three panels: the observed rate, the posterior rate
-        and the residuals, expressed as Poisson-equivalent Gaussian
-        pulls (data - posterior) / sqrt(posterior) -- computed in
-        count space, since dividing by exposure would distort the
-        Poisson variance the pull relies on. Masked pixels (see mask,
+        and the residuals, expressed as the relative residual
+        (data - posterior) / posterior. Masked pixels (see mask,
         mask_half(), mask_region()) are left blank in the data and
-        pull panels (there is no trustworthy data to show or check
+        residual panels (there is no trustworthy data to show or check
         there), but the posterior panel shows the actual
         posterior_rate() value there too (the prior, unaffected by
         data) -- the same rate written out for that pixel by
@@ -777,11 +834,8 @@ f"""{type(self).__name__} instance
         data_counts = self.counts[energy_bin_id]
         posterior_counts = self.posterior_counts(result, prior_strength=prior_strength)[energy_bin_id]
 
-        # The pull must be computed in count space: rate = counts /
-        # exposure does not preserve the Poisson variance (= mean) the
-        # pull relies on.
         pull = np.full(data_counts.shape, np.nan)
-        pull[mask] = (data_counts[mask] - posterior_counts[mask]) / np.sqrt(posterior_counts[mask])
+        pull[mask] = (data_counts[mask] - posterior_counts[mask]) / posterior_counts[mask]
 
         with np.errstate(invalid='ignore', divide='ignore'):
             data = (data_counts / self.raw_exposure).to_value(val_unit)
@@ -798,7 +852,7 @@ f"""{type(self).__name__} instance
         for ax, val, title, kwargs in zip(
             axes,
             (data, model, pull),
-            (f'Data rate [{val_unit}]', f'Posterior rate [{val_unit}]', 'Pull: (data - posterior) / sqrt(posterior)'),
+            (f'Data rate [{val_unit}]', f'Posterior rate [{val_unit}]', 'Residual: (data - posterior) / posterior'),
             (
                 dict(vmin=0, vmax=vmax, cmap=cmap),
                 dict(vmin=0, vmax=vmax, cmap=cmap),
@@ -823,8 +877,8 @@ f"""{type(self).__name__} instance
         Plot the observed vs. Bayesian posterior rate (see
         posterior_rate() -- the camera_response() fit used as the
         prior, updated bin-by-bin against the observed data) as a
-        function of energy, together with the residuals (pulls), as a
-        check of the fit quality across the whole energy range.
+        function of energy, together with the residuals, as a check of
+        the fit quality across the whole energy range.
 
         The plotted posterior curve is summed (per energy bin) over
         *all* pixels' rates (masked included), matching the total
@@ -835,9 +889,10 @@ f"""{type(self).__name__} instance
         only (there is no trustworthy rate to show for a masked pixel,
         see posterior_rate()), with its error bars obtained by
         properly propagating the per-pixel Poisson counting variance.
-        The pull is computed in count space (summed over the unmasked
-        pixels only), since dividing by exposure would distort the
-        Poisson variance it relies on.
+        The residual, (data - posterior) / posterior, is computed in
+        count space (summed over the unmasked pixels only); being a
+        ratio, its value is the same whether computed from counts or
+        from the corresponding rates.
 
         Parameters
         ----------
@@ -855,18 +910,17 @@ f"""{type(self).__name__} instance
         Returns
         -------
         fig, (ax_spec, ax_pull): matplotlib figure and axes
-            (rate spectrum, pull).
+            (rate spectrum, residual).
         """
         posterior_counts = self.posterior_counts(result, prior_strength=prior_strength)
         posterior_rate = self.posterior_rate(result, prior_strength=prior_strength)
 
         mask = np.broadcast_to(self.mask, self.raw_counts.shape)
 
-        # Pull in count space (Poisson statistics), summed over the
-        # unmasked pixels only.
+        # Residual in count space, summed over the unmasked pixels only.
         data_counts = self.counts.sum(axis=(1, 2))
         model_counts_unmasked = (posterior_counts * self.mask).sum(axis=(1, 2))
-        pull = (data_counts - model_counts_unmasked) / model_counts_unmasked
+        residual = (data_counts - model_counts_unmasked) / model_counts_unmasked
 
         # Displayed rate curves: per-pixel rate summed over energy,
         # with the Poisson counting variance propagated the same way
@@ -899,9 +953,9 @@ f"""{type(self).__name__} instance
         ax_spec.legend()
 
         ax_pull.axhline(0, color='gray', ls='--')
-        ax_pull.plot(e, pull, 'o', color='k')
+        ax_pull.plot(e, residual, 'o', color='k')
         ax_pull.set_xlabel(f'Energy [{e_unit}]')
-        ax_pull.set_ylabel('Pull')
+        ax_pull.set_ylabel('Residual')
         ax_pull.set_ylim(-2, 2)
 
         fig.tight_layout()
