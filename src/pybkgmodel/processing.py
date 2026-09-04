@@ -26,11 +26,9 @@ from pybkgmodel.camera import RectangularCameraImage
 # CameraImage.fit_camera_response() / fitted_differential_rate().
 # sigma0, delta_sigma, gamma, ecc, phi: 2D King function (camera
 #   acceptance shape); sigma0/delta_sigma set its energy-dependent width.
-# a0, delta_a: linear function of y; a0/delta_a set its energy-dependent
-#   slope.
-# norm, e0, alpha: log-parabola function of energy (beta fixed to 0,
-#   i.e. a plain power law for now).
-# eth, s: low-energy cutoff function of energy.
+# (the linear function of y has both its slope and intercept fixed,
+#   i.e. no y-dependence, for now; see camera_response())
+# norm, e0, alpha, beta: log-parabola function of energy.
 def default_camera_response_guess(bkg_map):
     """
     Generic initial guess and bounds for CameraImage.fit_camera_response(),
@@ -52,49 +50,40 @@ def default_camera_response_guess(bkg_map):
     """
     x_range = (bkg_map.xedges.max() - bkg_map.xedges.min()).to_value(u.deg)
     e0_guess = 1.0
-    eth_guess = 0.1
 
     sigma0 = x_range / 4
     delta_sigma0 = 0.0
-    gamma0 = 2.0
+    gamma0 = 1000.0
     ecc0 = 0.0
     phi0 = 0.0
-    a0 = 0.0
-    delta_a0 = 0.0
-    alpha0 = 2.0
-    s0 = 2.0
+    alpha0 = 1.7
+    beta0 = 0.1
 
     # Rough normalization guess, so that the model peak count matches
     # the observed peak count for the initial guess of the shape
-    # parameters above (sigma(e0) = sigma0, a(e0) = a0). The linear(y)
-    # function's intercept is fixed to 1 inside camera_response() (see
-    # linear()), so it does not enter here.
+    # parameters above (sigma(e0) = sigma0). The linear(y) function's
+    # intercept is fixed to 1 inside camera_response() (see linear()),
+    # so it does not enter here.
     king_peak = (1 - 1/gamma0) / (2 * np.pi * sigma0**2)
-    cutoff0 = np.exp(-(eth_guess / e0_guess)**s0)
     exposure0 = bkg_map.raw_exposure[bkg_map.mask].mean().to_value(u.s)
     counts_peak = bkg_map.raw_counts.max()
-    norm0 = max(counts_peak / max(king_peak * cutoff0 * exposure0, 1e-30), 1e-10)
+    norm0 = max(counts_peak / max(king_peak * exposure0, 1e-30), 1e-10)
 
     p0 = [
         sigma0, delta_sigma0, gamma0, ecc0, phi0,
-        a0, delta_a0,
-        norm0, e0_guess, alpha0,
-        eth_guess, s0
+        norm0, e0_guess, alpha0, beta0,
     ]
 
     bounds = [
         (sigma0 / 10, sigma0 * 10),        # sigma0
         (-3.0, 3.0),                       # delta_sigma
-        (1.01, 10.0),                      # gamma
+        (1.01, 10000.0),                      # gamma
         (0.0, 0.9),                        # ecc
         (-np.pi / 2, np.pi / 2),           # phi
-        (-1.0, 1.0),                       # a0
-        (-3.0, 3.0),                       # delta_a
         (norm0 / 1e3, norm0 * 1e3),        # norm
-        (e0_guess * 0.99, e0_guess * 1.01),  # e0 (effectively fixed)
-        (-2.0, 5.0),                       # alpha
-        (eth_guess * 0.3, eth_guess * 3),  # eth
-        (0.3, 10.0),                       # s
+        (e0_guess * 0.9, e0_guess * 1.1),  # e0
+        (0.0, 3.0),                      # alpha
+        (-1.0, 1.0),                       # beta
     ]
 
     return p0, bounds
@@ -104,10 +93,14 @@ def default_camera_response_guess(bkg_map):
 # fitted_differential_rate()); used to label the printed fit output.
 CAMERA_RESPONSE_PARAM_NAMES = (
     'sigma0', 'delta_sigma', 'gamma', 'ecc', 'phi',
-    'a0', 'delta_a',
-    'norm', 'e0', 'alpha',
-    'eth', 's',
+    'norm', 'e0', 'alpha', 'beta',
 )
+
+# Prior weight (in equivalent prior "pseudo-counts") used to combine
+# the camera_response() fit (as the prior) with the observed counts
+# (as the data) into the Bayesian posterior background model written
+# out by write_maps(); see CameraImage.posterior_counts().
+POSTERIOR_PRIOR_STRENGTH = 25.0
 
 # list of class attributes, which have a unit assigned
 quantity_list = [
@@ -407,21 +400,32 @@ class BkgMakerBase:
                            axis=0)
         exposure = u.Quantity([m.exposure for m in bkg_maps.values()]
                               ).sum(axis=0)
+
+        # A pixel masked out (zero exposure) in every contributing
+        # runwise map ends up with zero exposure here too; without a
+        # mask reflecting that, it would be treated downstream as a
+        # legitimate (near-)zero observation rather than as missing
+        # data.
+        mask = exposure > 0 * u.s
+
         stacked_map = RectangularCameraImage(counts,
                                              x_edges,
                                              y_edges,
                                              e_edges,
+                                             mask=mask,
                                              exposure=exposure)
         return stacked_map
 
     @staticmethod
-    def save_diagnostic_plots(bkg_map, base_path, result=None):
+    def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=POSTERIOR_PRIOR_STRENGTH):
         """
         Save diagnostic plot images for a single background map: the
         observed rate map (CameraImage.plot()) for every energy bin,
         and, if a camera_response() fit result is available, the
         spatial (CameraImage.plot_fit_check()) and spectral
-        (CameraImage.plot_fit_spectrum()) fit-quality checks.
+        (CameraImage.plot_fit_spectrum()) checks of the Bayesian
+        posterior counts (see CameraImage.posterior_counts()) against
+        the data.
 
         Parameters
         ----------
@@ -432,10 +436,14 @@ class BkgMakerBase:
             '_fit_check_bin<i>.png' and '_fit_spectrum.png' are
             appended to it.
         result : scipy.optimize.OptimizeResult, optional
-            Result of bkg_map.fit_camera_response() /
-            fitted_differential_rate(), must have a model_counts
-            attribute. If None (default), only the plain rate map is
+            Result of bkg_map.fit_camera_response(), must have a
+            model_counts attribute, used as the posterior_counts()
+            prior. If None (default), only the plain rate map is
             saved.
+        prior_strength : float
+            Prior weight passed to plot_fit_check() /
+            plot_fit_spectrum() (see CameraImage.posterior_counts()).
+            Defaults to POSTERIOR_PRIOR_STRENGTH.
         """
         n_ebins = len(bkg_map.energy_edges) - 1
 
@@ -445,12 +453,12 @@ class BkgMakerBase:
             pyplot.close(pyplot.gcf())
 
             if result is not None:
-                fig, _ = bkg_map.plot_fit_check(result, energy_bin_id=i)
+                fig, _ = bkg_map.plot_fit_check(result, energy_bin_id=i, prior_strength=prior_strength)
                 fig.savefig(f"{base_path}_fit_check_bin{i}.png")
                 pyplot.close(fig)
 
         if result is not None:
-            fig, _ = bkg_map.plot_fit_spectrum(result)
+            fig, _ = bkg_map.plot_fit_spectrum(result, prior_strength=prior_strength)
             fig.savefig(f"{base_path}_fit_spectrum.png")
             pyplot.close(fig)
 
@@ -463,15 +471,17 @@ class BkgMakerBase:
 
         Prior to writing, a camera_response() model (see
         pybkgmodel.camera.CameraImage.fit_camera_response()) is fit to
-        each map's observed counts, and the resulting smooth,
-        Poisson-noise-free rate is what gets written out as the BKG
-        column. If the fit does not converge, the map falls back to
-        the raw counts-based rate (CameraImage.differential_rate()) and
-        a warning is printed.
+        each map's observed counts, and used as the prior for a
+        bin-by-bin Bayesian update against the observed counts (see
+        CameraImage.posterior_counts(), with prior weight
+        POSTERIOR_PRIOR_STRENGTH). The resulting posterior rate is
+        what gets written out as the BKG column. If the fit does not
+        converge, the map falls back to the raw counts-based rate
+        (CameraImage.differential_rate()) and a warning is printed.
 
         Diagnostic plot images (the rate map, and, if the fit
-        succeeded, the fit-quality checks) are saved alongside each
-        output FITS file, see save_diagnostic_plots().
+        succeeded, the posterior fit-quality checks) are saved
+        alongside each output FITS file, see save_diagnostic_plots().
 
         Parameters
         ----------
@@ -495,12 +505,14 @@ class BkgMakerBase:
                 ('Nelder-Mead', dict(maxiter=50000, maxfev=50000, adaptive=True)),
             ):
                 try:
-                    dnde, fit_result = bkg_map.fitted_differential_rate(
+                    fit_result = bkg_map.fit_camera_response(
                         p0, bounds=bounds, method=method, options=options
                     )
                     if fit_result.success:
+                        dnde = bkg_map.posterior_differential_rate(
+                            fit_result, prior_strength=POSTERIOR_PRIOR_STRENGTH
+                        )
                         break
-                    dnde = None
                     fit_result = None
                 except Exception:  # pylint: disable=broad-except
                     dnde = None

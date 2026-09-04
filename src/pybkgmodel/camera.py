@@ -134,35 +134,27 @@ def low_energy_cutoff(e, eth, s):
     return np.exp(-np.power(eth/e, s))
 
 
-def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, norm, e0, alpha, eth, s):
+def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, norm, e0, alpha, beta):
     """
     Camera background response model, defined as the product of:
     1. a 2D King function of (x, y),
     2. a linear function of y,
-    3. a log-parabola function of e,
-    4. a low-energy exponential cutoff function of e.
+    3. a log-parabola function of e.
 
-    The linear function of y is used with its intercept fixed to 1
-    (see linear()), so that norm alone carries the overall
-    normalization of the model; this removes the degeneracy that would
-    otherwise exist between norm and the linear function's intercept.
+    The linear function of y currently has both its slope a and its
+    intercept b fixed (a = 0, b = 1, see linear()), i.e. it does not
+    depend on y at all for now; this was found to make the fit more
+    stable. Pass a explicitly to linear() directly if the y-dependence
+    is needed again.
 
-    The log-parabola's curvature term beta is fixed to 0, reducing it
-    to a plain power law (with the low-energy cutoff below still
-    applied); this is a simpler, more easily fit starting point than
-    the full log-parabola. Pass beta explicitly to log_parabola()
-    directly if the curvature term is needed.
-
-    x, y and e are not fully separable: the King function's width and
-    the linear function's slope are each allowed to vary with energy
-    through a power law,
+    x and e are not fully separable: the King function's width is
+    allowed to vary with energy through a power law,
 
         sigma(e) = sigma0 * (e/e0)**delta_sigma
-        a(e)     = a0     * (e/e0)**delta_a
 
     which is the lowest-order (linear in log(e/e0)) energy dependence
-    compatible with sigma(e) > 0 at all energies. delta_sigma = 0 and
-    delta_a = 0 recover the fully separable model.
+    compatible with sigma(e) > 0 at all energies. delta_sigma = 0
+    recovers the fully separable model.
 
     Parameters
     ----------
@@ -174,15 +166,8 @@ def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, 
         Parameters of the 2D King function, see king_function().
         sigma0 is the King function width at e = e0, and delta_sigma
         its power-law energy dependence (see above).
-    a0, delta_a: array_like
-        Parameters of the linear function of y, see linear().
-        a0 is the slope at e = e0, and delta_a its power-law energy
-        dependence (see above).
-    norm, e0, alpha: array_like
-        Parameters of the log-parabola function of e, see log_parabola()
-        (beta is fixed to 0, see above).
-    eth, s: array_like
-        Parameters of the low-energy cutoff function of e, see low_energy_cutoff().
+    norm, e0, alpha, beta: array_like
+        Parameters of the log-parabola function of e, see log_parabola().
 
     Returns
     -------
@@ -190,13 +175,11 @@ def camera_response(x, y, e, sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, 
         Camera response value.
     """
     sigma = sigma0 * np.power(e/e0, delta_sigma)
-    a = a0 * np.power(e/e0, delta_a)
 
     return (
         king_function(x, y, sigma, gamma, ecc=ecc, phi=phi)
-        * linear(y, a)
-        * log_parabola(e, norm, e0, alpha, beta=0.0)
-        * low_energy_cutoff(e, eth, s)
+        * linear(y, a=0.0)
+        * log_parabola(e, norm, e0, alpha, beta)
     )
 
 
@@ -517,7 +500,12 @@ f"""{type(self).__name__} instance
         e0 = (emin * emax)**0.5
         int2diff = (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
 
-        rate = result.model_counts / self.raw_exposure / self.pixel_area
+        # Using model_rate (exposure-independent) directly, rather than
+        # model_counts / exposure, avoids a 0/0 division in pixels with
+        # zero exposure (e.g. never covered by any stacked run/always
+        # excluded); model_rate is mathematically identical to
+        # model_counts / exposure wherever exposure is nonzero.
+        rate = result.model_rate / self.pixel_area
         dnde = rate * int2diff[:, None, None]
 
         return dnde, result
@@ -529,14 +517,17 @@ f"""{type(self).__name__} instance
         (i.e. minimizing the C-stat, see cstat()).
 
         Only the unmasked pixels (see mask, mask_half(), mask_region())
-        are included in the fit.
+        are included in the fit. In energy, only the bin with the
+        highest total count (in the unmasked pixels) and all bins
+        above it are included; bins below the peak are excluded from
+        the fit entirely.
 
         Parameters
         ----------
         p0: array_like
             Initial guess for the camera_response() fit parameters
-            (sigma0, delta_sigma, gamma, ecc, phi, a0, delta_a, norm, e0,
-            alpha, eth, s).
+            (sigma0, delta_sigma, gamma, ecc, phi, norm, e0, alpha,
+            beta).
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
             in degrees and TeV respectively.
@@ -574,6 +565,16 @@ f"""{type(self).__name__} instance
         counts = self.raw_counts
         mask = np.broadcast_to(self.mask, counts.shape)
 
+        # Also restrict the fit to the energy bin with the highest
+        # total count (in the unmasked pixels) and all bins above it:
+        # bins below the peak carry little information to constrain
+        # the energy-dependent fit parameters and would otherwise just
+        # add spurious -model_counts terms to the fit statistic.
+        bin_totals = (counts * mask).sum(axis=(1, 2))
+        peak_bin = np.argmax(bin_totals)
+        in_range = np.arange(len(bin_totals)) >= peak_bin
+        mask = mask & in_range[:, None, None]
+
         def neg_log_likelihood(params):
             model_counts = camera_response(xx, yy, ee, *params) * exposure
             return cstat(counts[mask], model_counts[mask])
@@ -587,20 +588,168 @@ f"""{type(self).__name__} instance
         )
 
         result.model_counts = camera_response(xx, yy, ee, *result.x) * exposure
+        # Exposure-independent fitted rate (model_counts = model_rate *
+        # exposure): unlike model_counts, this stays well-defined even
+        # in pixels with zero exposure, and is what fitted_differential_rate()
+        # / posterior_differential_rate() fall back to there instead of
+        # dividing by zero.
+        result.model_rate = camera_response(xx, yy, ee, *result.x) / u.s
 
         return result
 
-    def plot_fit_check(self, result, energy_bin_id=0, ax_unit='deg', cmap='viridis'):
+    def posterior_counts(self, result, prior_strength=1.0):
         """
-        Plot a spatial comparison between the observed counts and the
-        counts predicted by a camera_response() fit (see
-        fit_camera_response()), for one energy bin, as a visual check
-        of the fit quality.
+        Bayesian per-bin update of the observed counts, using the
+        camera_response() fit (see fit_camera_response()) as the prior
+        and the observed counts as the data.
 
-        Produces three panels: the observed counts, the fitted model
-        counts and the residuals, expressed as Poisson-equivalent
-        Gaussian pulls (data - model) / sqrt(model). Masked pixels
-        (see mask, mask_half(), mask_region()) are left blank.
+        Each bin's true mean count mu is given a Gamma(k, k/lambda)
+        prior, where lambda = result.model_counts is the fitted,
+        statistically smooth model (the prior mean) and k =
+        prior_strength is the prior's weight, expressed as an
+        equivalent number of prior "pseudo-counts". The observed count
+        n ~ Poisson(mu) then updates this to the conjugate posterior
+        Gamma(k + n, k/lambda + 1), whose mean is
+
+            posterior_mean = (k + n) * lambda / (k + lambda)
+
+        This shrinks noisy, low-count bins toward the smooth fitted
+        model (posterior_mean -> lambda as n, lambda << k) while
+        letting well-measured, high-count bins be dominated by the
+        data (posterior_mean -> n as lambda, n >> k) -- a smooth,
+        Poisson-noise-reduced count map that still tracks genuine
+        small-scale features in the data the smooth fit cannot
+        capture.
+
+        Masked pixels (see mask, mask_half(), mask_region()) have no
+        valid data to update the prior with -- e.g. a source region's
+        raw counts are contaminated by real signal, not pure
+        background -- so no likelihood term is evaluated there at all,
+        and the posterior is left equal to the prior (lambda)
+        unchanged. Note that replacing the *data* with 0 in that case
+        (rather than omitting the update) would not avoid this
+        contamination cleanly either: it would feed the update a false
+        "0 counts observed" likelihood, biasing the posterior below
+        lambda instead.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), must have a model_counts
+            attribute of the same shape as CameraImage.counts, used as
+            the per-bin prior mean.
+        prior_strength: float
+            Equivalent number of prior "pseudo-counts" k (k > 0)
+            controlling how strongly the fitted model constrains the
+            posterior relative to the data. Larger values weight the
+            prior (the fit) more heavily; smaller values let the raw
+            data dominate. Defaults to 1.0.
+
+        Returns
+        -------
+        counts: array_like
+            Posterior mean count in each bin, of the same shape as
+            CameraImage.counts.
+        """
+        n = self.raw_counts
+        lam = result.model_counts
+        k = prior_strength
+
+        updated = (k + n) * lam / (k + lam)
+        mask = np.broadcast_to(self.mask, n.shape)
+
+        return np.where(mask, updated, lam)
+
+    def posterior_rate(self, result, prior_strength=1.0):
+        """
+        Bayesian posterior counts (see posterior_counts()), converted
+        to a plain per-pixel rate (posterior_counts / exposure, in
+        1/s) -- the same rate quantity plot() shows for the raw data.
+
+        Pixels with zero exposure (e.g. never covered by any stacked
+        run/always excluded, see mask, mask_half(), mask_region())
+        give a 0/0 division here; there, this falls back to the
+        exposure-independent fitted rate (result.model_rate, see
+        fit_camera_response()) instead of propagating a NaN.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), used as the prior, see
+            posterior_counts().
+        prior_strength: float
+            Prior weight, see posterior_counts().
+
+        Returns
+        -------
+        rate: array_like astropy.unit.Quantity
+            Posterior rate, of the same shape as CameraImage.counts.
+        """
+        posterior_counts = self.posterior_counts(result, prior_strength=prior_strength)
+
+        with np.errstate(invalid='ignore', divide='ignore'):
+            rate = posterior_counts / self.raw_exposure
+
+        invalid = ~np.isfinite(rate.value)
+        if np.any(invalid):
+            rate = rate.copy()
+            rate[invalid] = result.model_rate[invalid]
+
+        return rate
+
+    def posterior_differential_rate(self, result, prior_strength=1.0, index=-2):
+        """
+        Same as fitted_differential_rate(), but based on the Bayesian
+        per-bin posterior counts (see posterior_counts()) instead of
+        directly on the camera_response() fit's model counts.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), used as the prior, see
+            posterior_counts().
+        prior_strength: float
+            Prior weight, see posterior_counts().
+        index: float
+            Power law spectral index used to convert the integrated,
+            per-bin posterior counts into a differential rate, see
+            differential_rate(). Defaults to -2.
+
+        Returns
+        -------
+        dnde: array_like astropy.unit.Quantity
+            Posterior differential rate, of the same shape as the
+            camera image, see differential_rate().
+        """
+        emin = self.energy_edges[:-1]
+        emax = self.energy_edges[1:]
+        e0 = (emin * emax)**0.5
+        int2diff = (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
+
+        rate = self.posterior_rate(result, prior_strength=prior_strength) / self.pixel_area
+        dnde = rate * int2diff[:, None, None]
+
+        return dnde
+
+    def plot_fit_check(self, result, energy_bin_id=0, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1/s'):
+        """
+        Plot a spatial comparison between the observed rate and the
+        Bayesian posterior rate (see posterior_rate()) -- the
+        camera_response() fit (see fit_camera_response()) used as the
+        prior, updated bin-by-bin against the observed data -- for one
+        energy bin, as a visual check of the fit quality.
+
+        Produces three panels: the observed rate, the posterior rate
+        and the residuals, expressed as Poisson-equivalent Gaussian
+        pulls (data - posterior) / sqrt(posterior) -- computed in
+        count space, since dividing by exposure would distort the
+        Poisson variance the pull relies on. Masked pixels (see mask,
+        mask_half(), mask_region()) are left blank in the data and
+        pull panels (there is no trustworthy data to show or check
+        there), but the posterior panel shows the actual
+        posterior_rate() value there too (the prior, unaffected by
+        data) -- the same rate written out for that pixel by
+        pybkgmodel.processing.BkgMakerBase.write_maps().
 
         Parameters
         ----------
@@ -612,24 +761,36 @@ f"""{type(self).__name__} instance
         ax_unit: str
             Unit to use for the x/y axes.
         cmap: str
-            Colormap to use for the data/model count maps.
+            Colormap to use for the data/posterior rate maps.
+        prior_strength: float
+            Prior weight passed to posterior_counts() / posterior_rate().
+            Defaults to 10.0.
+        val_unit: str
+            Unit to use for the data/posterior rate maps.
 
         Returns
         -------
         fig, axes: matplotlib figure and array of 3 axes
-            (data, model, pull).
+            (data, posterior, pull).
         """
         mask = self.mask
-        data = self.counts[energy_bin_id]
-        model = result.model_counts[energy_bin_id] * mask
+        data_counts = self.counts[energy_bin_id]
+        posterior_counts = self.posterior_counts(result, prior_strength=prior_strength)[energy_bin_id]
 
-        pull = np.full(data.shape, np.nan)
-        pull[mask] = (data[mask] - model[mask]) / np.sqrt(model[mask])
+        # The pull must be computed in count space: rate = counts /
+        # exposure does not preserve the Poisson variance (= mean) the
+        # pull relies on.
+        pull = np.full(data_counts.shape, np.nan)
+        pull[mask] = (data_counts[mask] - posterior_counts[mask]) / np.sqrt(posterior_counts[mask])
+
+        with np.errstate(invalid='ignore', divide='ignore'):
+            data = (data_counts / self.raw_exposure).to_value(val_unit)
+        model = self.posterior_rate(result, prior_strength=prior_strength)[energy_bin_id].to_value(val_unit)
 
         xedges = self.xedges.to_value(ax_unit)
         yedges = self.yedges.to_value(ax_unit)
 
-        vmax = max(data.max(), model.max())
+        vmax = max(np.nanmax(data), model.max())
         pmax = np.nanmax(np.abs(pull)) if np.any(mask) else 1
 
         fig, axes = pyplot.subplots(1, 3, figsize=(15, 4))
@@ -637,7 +798,7 @@ f"""{type(self).__name__} instance
         for ax, val, title, kwargs in zip(
             axes,
             (data, model, pull),
-            ('Data counts', 'Model counts', 'Pull: (data - model) / sqrt(model)'),
+            (f'Data rate [{val_unit}]', f'Posterior rate [{val_unit}]', 'Pull: (data - posterior) / sqrt(posterior)'),
             (
                 dict(vmin=0, vmax=vmax, cmap=cmap),
                 dict(vmin=0, vmax=vmax, cmap=cmap),
@@ -657,12 +818,26 @@ f"""{type(self).__name__} instance
 
         return fig, axes
 
-    def plot_fit_spectrum(self, result, e_unit='TeV'):
+    def plot_fit_spectrum(self, result, e_unit='TeV', prior_strength=10.0, val_unit='1/s'):
         """
-        Plot the observed vs. fitted (model) counts, summed over all
-        unmasked pixels, as a function of energy, together with the
-        residuals (pulls), as a check of the fit quality across the
-        whole energy range.
+        Plot the observed vs. Bayesian posterior rate (see
+        posterior_rate() -- the camera_response() fit used as the
+        prior, updated bin-by-bin against the observed data) as a
+        function of energy, together with the residuals (pulls), as a
+        check of the fit quality across the whole energy range.
+
+        The plotted posterior curve is summed (per energy bin) over
+        *all* pixels' rates (masked included), matching the total
+        actually written out by
+        pybkgmodel.processing.BkgMakerBase.write_maps() -- masked
+        pixels contribute their prior (unaffected by data) rate. The
+        data curve sums the observed rate over the unmasked pixels
+        only (there is no trustworthy rate to show for a masked pixel,
+        see posterior_rate()), with its error bars obtained by
+        properly propagating the per-pixel Poisson counting variance.
+        The pull is computed in count space (summed over the unmasked
+        pixels only), since dividing by exposure would distort the
+        Poisson variance it relies on.
 
         Parameters
         ----------
@@ -671,18 +846,43 @@ f"""{type(self).__name__} instance
             attribute of the same shape as CameraImage.counts.
         e_unit: str
             Unit to use for the energy axis.
+        prior_strength: float
+            Prior weight passed to posterior_counts() / posterior_rate().
+            Defaults to 10.0.
+        val_unit: str
+            Unit to use for the count-rate axis.
 
         Returns
         -------
         fig, (ax_spec, ax_pull): matplotlib figure and axes
-            (count spectrum, pull).
+            (rate spectrum, pull).
         """
-        data = self.counts.sum(axis=(1, 2))
-        model = (result.model_counts * self.mask).sum(axis=(1, 2))
+        posterior_counts = self.posterior_counts(result, prior_strength=prior_strength)
+        posterior_rate = self.posterior_rate(result, prior_strength=prior_strength)
+
+        mask = np.broadcast_to(self.mask, self.raw_counts.shape)
+
+        # Pull in count space (Poisson statistics), summed over the
+        # unmasked pixels only.
+        data_counts = self.counts.sum(axis=(1, 2))
+        model_counts_unmasked = (posterior_counts * self.mask).sum(axis=(1, 2))
+        pull = (data_counts - model_counts_unmasked) / model_counts_unmasked
+
+        # Displayed rate curves: per-pixel rate summed over energy,
+        # with the Poisson counting variance propagated the same way
+        # (Var(counts/exposure) = counts/exposure**2).
+        with np.errstate(invalid='ignore', divide='ignore'):
+            data_rate_map = self.raw_counts / self.raw_exposure
+            data_var_map = self.raw_counts / self.raw_exposure**2
+
+        data_rate_map = np.where(mask, data_rate_map, 0)
+        data_var_map = np.where(mask, data_var_map, 0)
+
+        data = data_rate_map.sum(axis=(1, 2)).to_value(val_unit)
+        data_err = np.sqrt(data_var_map.sum(axis=(1, 2)).to_value(u.Unit(val_unit)**2))
+        model = posterior_rate.sum(axis=(1, 2)).to_value(val_unit)
 
         e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(e_unit)
-        data_err = np.sqrt(data)
-        pull = (data - model) / np.sqrt(model)
 
         fig, (ax_spec, ax_pull) = pyplot.subplots(
             2, 1, sharex=True, figsize=(6, 6),
@@ -690,16 +890,19 @@ f"""{type(self).__name__} instance
         )
 
         ax_spec.errorbar(e, data, yerr=data_err, fmt='o', color='k', label='Data')
-        ax_spec.plot(e, model, '-', color='C1', label='Model')
+        ax_spec.plot(e, model, '-', color='C1', label='Posterior')
         ax_spec.set_xscale('log')
         ax_spec.set_yscale('log')
-        ax_spec.set_ylabel('Counts')
+        ax_spec.set_xlim(left=0.1)
+        ax_spec.set_ylim(bottom=np.min(data[data > 0]) / 2, top=1.5 * data.max())
+        ax_spec.set_ylabel(f'Rate [{val_unit}]')
         ax_spec.legend()
 
         ax_pull.axhline(0, color='gray', ls='--')
         ax_pull.plot(e, pull, 'o', color='k')
         ax_pull.set_xlabel(f'Energy [{e_unit}]')
         ax_pull.set_ylabel('Pull')
+        ax_pull.set_ylim(-2, 2)
 
         fig.tight_layout()
 

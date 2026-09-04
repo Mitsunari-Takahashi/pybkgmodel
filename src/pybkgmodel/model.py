@@ -181,9 +181,17 @@ class WobbleMap(BaseMap):
         counts = np.sum([im.counts for im in images], axis=0)
         exposure = u.Quantity([im.exposure for im in images]).sum(axis=0)
 
+        # A pixel masked out in every contributing image (e.g. never
+        # covered by an unmasked half in any of the stacked runs) ends
+        # up with zero exposure here; without a mask reflecting that,
+        # it would be treated downstream as a legitimate (near-)zero
+        # observation rather than as missing data.
+        mask = exposure > 0 * u.s
+
         return RectangularCameraImage(counts, self.xedges,
                                       self.yedges,
                                       self.energy_edges,
+                                      mask=mask,
                                       exposure=exposure
                                       )
 
@@ -297,9 +305,17 @@ class ExclusionMap(BaseMap):
         counts = np.sum([im.counts for im in images], axis=0)
         exposure = u.Quantity([im.exposure for im in images]).sum(axis=0)
 
+        # A pixel excluded in every contributing image (e.g. always
+        # inside one of the exclusion regions) ends up with zero
+        # exposure here; without a mask reflecting that, it would be
+        # treated downstream as a legitimate (near-)zero observation
+        # rather than as missing data.
+        mask = exposure > 0 * u.s
+
         return RectangularCameraImage(counts,
                                       self.xedges,
                                       self.yedges,
                                       self.energy_edges,
+                                      mask=mask,
                                       exposure=exposure
                                       )
