@@ -193,27 +193,35 @@ def low_energy_cutoff(e, eth, s):
     return np.exp(-np.power(eth/e, s))
 
 
-def camera_response(x, y, e, sigma0, delta_sigma, p, ecc, phi, norm, e0, alpha, beta):
+def camera_response(x, y, e,
+                     sigma_core0, delta_sigma_core, x0_core, y0_core,
+                     sigma_tail, gamma_tail, ecc_tail, phi_tail, x0_tail, y0_tail,
+                     w,
+                     norm, e0, alpha, beta):
     """
     Camera background response model, defined as the product of:
-    1. a 2D super-Gaussian function of (x, y),
-    2. a linear function of y,
+    1. a spatial (x, y) distribution, itself the sum of two components:
+       a. a circularly symmetric 2D Gaussian "core", and
+       b. an elliptical 2D King function "tail" (see king_function()),
+       mixed as w*core + (1-w)*tail, with each individually normalized
+       to integrate to 1 over the camera plane, so w is the fraction
+       of the spatial distribution's total (normalized) weight
+       contributed by the core.
+    2. a linear function of y (currently fixed to a constant 1, see
+       linear() -- both its slope and intercept are fixed for now, as
+       this was found to make the fit more stable),
     3. a log-parabola function of e.
 
-    The linear function of y currently has both its slope a and its
-    intercept b fixed (a = 0, b = 1, see linear()), i.e. it does not
-    depend on y at all for now; this was found to make the fit more
-    stable. Pass a explicitly to linear() directly if the y-dependence
-    is needed again.
+    The core and tail are allowed independent centers (x0_core, y0_core
+    and x0_tail, y0_tail): nothing forces them to coincide. Only the
+    core's width varies with energy, through a power law,
 
-    x and e are not fully separable: the super-Gaussian's width is
-    allowed to vary with energy through a power law,
-
-        sigma(e) = sigma0 * (e/e0)**delta_sigma
+        sigma_core(e) = sigma_core0 * (e/e0)**delta_sigma_core
 
     which is the lowest-order (linear in log(e/e0)) energy dependence
-    compatible with sigma(e) > 0 at all energies. delta_sigma = 0
-    recovers the fully separable model.
+    compatible with sigma_core(e) > 0 at all energies. delta_sigma_core
+    = 0 recovers an energy-independent core width. The tail's width
+    (sigma_tail) has no energy dependence.
 
     Parameters
     ----------
@@ -221,10 +229,16 @@ def camera_response(x, y, e, sigma0, delta_sigma, p, ecc, phi, norm, e0, alpha, 
         Camera plane coordinates.
     e: array_like
         Energy.
-    sigma0, delta_sigma, p, ecc, phi: array_like
-        Parameters of the 2D super-Gaussian function, see
-        super_gaussian(). sigma0 is its width at e = e0, and
-        delta_sigma its power-law energy dependence (see above).
+    sigma_core0, delta_sigma_core, x0_core, y0_core: array_like
+        Parameters of the Gaussian core (a super_gaussian() with
+        p = 1, ecc = 0, phi = 0). sigma_core0 is its width at e = e0,
+        and delta_sigma_core its power-law energy dependence (see
+        above); x0_core, y0_core its center.
+    sigma_tail, gamma_tail, ecc_tail, phi_tail, x0_tail, y0_tail: array_like
+        Parameters of the King function tail, see king_function().
+    w: array_like
+        Fraction (0 < w < 1) of the spatial distribution's weight in
+        the core, vs. (1 - w) in the tail (see above).
     norm, e0, alpha, beta: array_like
         Parameters of the log-parabola function of e, see log_parabola().
 
@@ -233,10 +247,14 @@ def camera_response(x, y, e, sigma0, delta_sigma, p, ecc, phi, norm, e0, alpha, 
     val: array_like
         Camera response value.
     """
-    sigma = sigma0 * np.power(e/e0, delta_sigma)
+    sigma_core = sigma_core0 * np.power(e/e0, delta_sigma_core)
+
+    core = super_gaussian(x, y, sigma_core, p=1.0, x0=x0_core, y0=y0_core)
+    tail = king_function(x, y, sigma_tail, gamma_tail, ecc=ecc_tail, phi=phi_tail, x0=x0_tail, y0=y0_tail)
+    spatial = w*core + (1 - w)*tail
 
     return (
-        super_gaussian(x, y, sigma, p, ecc=ecc, phi=phi)
+        spatial
         * linear(y, a=0.0)
         * log_parabola(e, norm, e0, alpha, beta)
     )
@@ -585,8 +603,9 @@ f"""{type(self).__name__} instance
         ----------
         p0: array_like
             Initial guess for the camera_response() fit parameters
-            (sigma0, delta_sigma, p, ecc, phi, norm, e0, alpha,
-            beta).
+            (sigma_core0, delta_sigma_core, x0_core, y0_core,
+            sigma_tail, gamma_tail, ecc_tail, phi_tail, x0_tail, y0_tail,
+            w, norm, e0, alpha, beta).
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
             in degrees and TeV respectively.

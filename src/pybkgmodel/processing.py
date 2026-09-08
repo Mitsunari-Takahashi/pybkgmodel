@@ -24,8 +24,11 @@ from pybkgmodel.camera import RectangularCameraImage
 
 # Order of the camera_response() fit parameters, as expected by
 # CameraImage.fit_camera_response() / fitted_differential_rate().
-# sigma0, delta_sigma, p, ecc, phi: 2D super-Gaussian function (camera
-#   acceptance shape); sigma0/delta_sigma set its energy-dependent width.
+# sigma_core0, delta_sigma_core, x0_core, y0_core: Gaussian core (camera
+#   acceptance shape's central component).
+# sigma_tail, gamma_tail, ecc_tail, phi_tail, x0_tail, y0_tail: King
+#   function tail (extended halo component).
+# w: fraction of the spatial distribution's weight in the core.
 # (the linear function of y has both its slope and intercept fixed,
 #   i.e. no y-dependence, for now; see camera_response())
 # norm, e0, alpha, beta: log-parabola function of energy.
@@ -48,39 +51,57 @@ def default_camera_response_guess(bkg_map):
     bounds: list of (min, max)
         Bounds for the fit parameters.
     """
-    x_range = (bkg_map.xedges.max() - bkg_map.xedges.min()).to_value(u.deg)
+    x_min, x_max = bkg_map.xedges.min().to_value(u.deg), bkg_map.xedges.max().to_value(u.deg)
+    y_min, y_max = bkg_map.yedges.min().to_value(u.deg), bkg_map.yedges.max().to_value(u.deg)
+    x_range = x_max - x_min
     e0_guess = 1.0
 
-    sigma0 = x_range / 4
-    delta_sigma0 = 0.0
-    p0_shape = 1.0
-    ecc0 = 0.0
-    phi0 = 0.0
+    sigma_core0 = x_range / 4
+    delta_sigma_core0 = 0.0
+    x0_core0, y0_core0 = 0.0, 0.0
+
+    sigma_tail0 = x_range / 2
+    gamma_tail0 = 2.0
+    ecc_tail0 = 0.0
+    phi_tail0 = 0.0
+    x0_tail0, y0_tail0 = 0.0, 0.0
+
+    w0 = 0.5
+
     alpha0 = 1.7
     beta0 = 0.1
 
     # Rough normalization guess, so that the model peak count matches
     # the observed peak count for the initial guess of the shape
-    # parameters above (sigma(e0) = sigma0). The linear(y) function's
-    # intercept is fixed to 1 inside camera_response() (see linear()),
-    # so it does not enter here. At p0_shape = 1 the super-Gaussian is
-    # an ordinary Gaussian, whose peak value is 1/(2*pi*sigma0**2).
-    gauss_peak = 1 / (2 * np.pi * sigma0**2)
+    # parameters above (both components centered at the origin). The
+    # linear(y) function's intercept is fixed to 1 inside
+    # camera_response() (see linear()), so it does not enter here.
+    core_peak = 1 / (2 * np.pi * sigma_core0**2)
+    tail_peak = (1 - 1/gamma_tail0) / (2 * np.pi * sigma_tail0**2)
+    spatial_peak = w0*core_peak + (1 - w0)*tail_peak
     exposure0 = bkg_map.raw_exposure[bkg_map.mask].mean().to_value(u.s)
     counts_peak = bkg_map.raw_counts.max()
-    norm0 = max(counts_peak / max(gauss_peak * exposure0, 1e-30), 1e-10)
+    norm0 = max(counts_peak / max(spatial_peak * exposure0, 1e-30), 1e-10)
 
     p0 = [
-        sigma0, delta_sigma0, p0_shape, ecc0, phi0,
+        sigma_core0, delta_sigma_core0, x0_core0, y0_core0,
+        sigma_tail0, gamma_tail0, ecc_tail0, phi_tail0, x0_tail0, y0_tail0,
+        w0,
         norm0, e0_guess, alpha0, beta0,
     ]
 
     bounds = [
-        (sigma0 / 10, sigma0 * 10),        # sigma0
-        (-3.0, 3.0),                       # delta_sigma
-        (0.3, 5.0),                        # p (shape's flatness exponent)
-        (0.0, 0.9),                        # ecc
-        (-np.pi / 2, np.pi / 2),           # phi
+        (sigma_core0 / 10, sigma_core0 * 10),  # sigma_core0
+        (-3.0, 3.0),                       # delta_sigma_core
+        (x_min, x_max),                    # x0_core
+        (y_min, y_max),                    # y0_core
+        (sigma_tail0 / 10, sigma_tail0 * 10),  # sigma_tail
+        (1.01, 10.0),                       # gamma_tail
+        (0.0, 0.9),                        # ecc_tail
+        (-np.pi / 2, np.pi / 2),           # phi_tail
+        (x_min, x_max),                    # x0_tail
+        (y_min, y_max),                    # y0_tail
+        (0.01, 0.99),                      # w
         (norm0 / 1e3, norm0 * 1e3),        # norm
         (e0_guess * 0.9, e0_guess * 1.1),  # e0
         (0.0, 3.0),                      # alpha
@@ -93,7 +114,9 @@ def default_camera_response_guess(bkg_map):
 # p0/bounds above (and as result.x from fit_camera_response() /
 # fitted_differential_rate()); used to label the printed fit output.
 CAMERA_RESPONSE_PARAM_NAMES = (
-    'sigma0', 'delta_sigma', 'p', 'ecc', 'phi',
+    'sigma_core0', 'delta_sigma_core', 'x0_core', 'y0_core',
+    'sigma_tail', 'gamma_tail', 'ecc_tail', 'phi_tail', 'x0_tail', 'y0_tail',
+    'w',
     'norm', 'e0', 'alpha', 'beta',
 )
 
