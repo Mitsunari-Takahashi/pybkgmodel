@@ -32,7 +32,8 @@ from pybkgmodel.camera import RectangularCameraImage
 # sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail, x0_tail,
 #   y0_tail: King function tail (extended halo component);
 #   ecc_tail0/delta_ecc_tail set its energy-dependent eccentricity.
-# w: fraction of the spatial distribution's weight in the core.
+# w0, delta_w: fraction of the spatial distribution's weight in the
+#   core, and its energy dependence.
 # (the linear function of y has both its slope and intercept fixed,
 #   i.e. no y-dependence, for now; see camera_response())
 # norm, e0, alpha, beta: log-parabola function of energy.
@@ -77,6 +78,7 @@ def default_camera_response_guess(bkg_map):
     x0_tail0, y0_tail0 = 0.0, 0.0
 
     w0 = 0.5
+    delta_w0 = 0.0
 
     alpha0 = 1.7
     beta0 = 0.1
@@ -96,7 +98,7 @@ def default_camera_response_guess(bkg_map):
     p0 = [
         sigma_core0, delta_sigma_core0, x0_core0, y0_core0, x0_delta0, y0_delta0, Ec_core0,
         sigma_tail0, gamma_tail0, ecc_tail0, delta_ecc_tail0, phi_tail0, x0_tail0, y0_tail0,
-        w0,
+        w0, delta_w0,
         norm0, e0_guess, alpha0, beta0,
     ]
 
@@ -107,7 +109,7 @@ def default_camera_response_guess(bkg_map):
         (y_min, y_max),                    # y0_core0
         (x_min, x_max),                    # x0_delta
         (y_min, y_max),                    # y0_delta
-        (-0.5, 0.5),                       # Ec_core
+        (0.01, 2.0),                       # Ec_core
         (sigma_tail0 / 10, sigma_tail0 * 10),  # sigma_tail
         (1.01, 10.0),                       # gamma_tail
         (0.01, 0.9),                       # ecc_tail0 (kept off the 0/1 logit boundary)
@@ -115,7 +117,8 @@ def default_camera_response_guess(bkg_map):
         (-np.pi / 2, np.pi / 2),           # phi_tail
         (x_min, x_max),                    # x0_tail
         (y_min, y_max),                    # y0_tail
-        (0.01, 0.99),                      # w
+        (0.01, 0.99),                      # w0 (kept off the 0/1 logit boundary)
+        (-3.0, 3.0),                       # delta_w
         (norm0 / 1e3, norm0 * 1e3),        # norm
         (e0_guess * 0.9, e0_guess * 1.1),  # e0
         (0.0, 3.0),                      # alpha
@@ -130,7 +133,7 @@ def default_camera_response_guess(bkg_map):
 CAMERA_RESPONSE_PARAM_NAMES = (
     'sigma_core0', 'delta_sigma_core', 'x0_core0', 'y0_core0', 'x0_delta', 'y0_delta', 'Ec_core',
     'sigma_tail', 'gamma_tail', 'ecc_tail0', 'delta_ecc_tail', 'phi_tail', 'x0_tail', 'y0_tail',
-    'w',
+    'w0', 'delta_w',
     'norm', 'e0', 'alpha', 'beta',
 )
 

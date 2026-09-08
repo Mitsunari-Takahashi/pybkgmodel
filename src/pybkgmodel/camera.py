@@ -196,7 +196,7 @@ def low_energy_cutoff(e, eth, s):
 def camera_response(x, y, e,
                      sigma_core0, delta_sigma_core, x0_core0, y0_core0, x0_delta, y0_delta, Ec_core,
                      sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail, x0_tail, y0_tail,
-                     w,
+                     w0, delta_w,
                      norm, e0, alpha, beta):
     """
     Camera background response model, defined as the product of:
@@ -206,7 +206,7 @@ def camera_response(x, y, e,
        mixed as w*core + (1-w)*tail, with each individually normalized
        to integrate to 1 over the camera plane, so w is the fraction
        of the spatial distribution's total (normalized) weight
-       contributed by the core.
+       contributed by the core (see below for its energy dependence).
     2. a linear function of y (currently fixed to a constant 1, see
        linear() -- both its slope and intercept are fixed for now, as
        this was found to make the fit more stable),
@@ -250,6 +250,14 @@ def camera_response(x, y, e,
     exactly, and delta_ecc_tail = 0 recovers an energy-independent
     tail eccentricity.
 
+    The core fraction w is bounded the same way (0, 1) and uses the
+    same logistic construction,
+
+        w(e) = sigmoid(logit(w0) + delta_w*log(e/e0))
+
+    so w(e0) = w0 exactly, and delta_w = 0 recovers an energy-independent
+    core/tail mix.
+
     Parameters
     ----------
     x, y: array_like
@@ -268,9 +276,11 @@ def camera_response(x, y, e,
         Parameters of the King function tail, see king_function().
         ecc_tail0 is its eccentricity at e = e0, and delta_ecc_tail its
         logistic energy dependence (see above).
-    w: array_like
+    w0, delta_w: array_like
         Fraction (0 < w < 1) of the spatial distribution's weight in
-        the core, vs. (1 - w) in the tail (see above).
+        the core, vs. (1 - w) in the tail (see above). w0 is its value
+        at e = e0, and delta_w its logistic energy dependence (see
+        above).
     norm, e0, alpha, beta: array_like
         Parameters of the log-parabola function of e, see log_parabola().
 
@@ -287,6 +297,9 @@ def camera_response(x, y, e,
 
     ecc_tail_logit0 = np.log(ecc_tail0 / (1 - ecc_tail0))
     ecc_tail = 1 / (1 + np.exp(-(ecc_tail_logit0 + delta_ecc_tail*np.log(e/e0))))
+
+    w_logit0 = np.log(w0 / (1 - w0))
+    w = 1 / (1 + np.exp(-(w_logit0 + delta_w*np.log(e/e0))))
 
     core = super_gaussian(x, y, sigma_core, p=1.0, x0=x0_core, y0=y0_core)
     tail = king_function(x, y, sigma_tail, gamma_tail, ecc=ecc_tail, phi=phi_tail, x0=x0_tail, y0=y0_tail)
@@ -645,7 +658,7 @@ f"""{type(self).__name__} instance
             (sigma_core0, delta_sigma_core, x0_core0, y0_core0,
             x0_delta, y0_delta, Ec_core,
             sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail,
-            x0_tail, y0_tail, w, norm, e0, alpha, beta).
+            x0_tail, y0_tail, w0, delta_w, norm, e0, alpha, beta).
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
             in degrees and TeV respectively.
