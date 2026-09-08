@@ -194,7 +194,7 @@ def low_energy_cutoff(e, eth, s):
 
 
 def camera_response(x, y, e,
-                     sigma_core0, delta_sigma_core, x0_core, y0_core,
+                     sigma_core0, delta_sigma_core, x0_core0, y0_core0, x0_delta, y0_delta, Ec_core,
                      sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail, x0_tail, y0_tail,
                      w,
                      norm, e0, alpha, beta):
@@ -220,9 +220,24 @@ def camera_response(x, y, e,
 
     which is the lowest-order (linear in log(e/e0)) energy dependence
     compatible with sigma_core(e) > 0 at all energies. delta_sigma_core
-    = 0 recovers an energy-independent core width. The tail's width
-    (sigma_tail) has no energy dependence, but its eccentricity does,
-    through a logistic (sigmoid) function of log(e/e0),
+    = 0 recovers an energy-independent core width. The core's center
+    also shifts with energy, around a fixed base position (x0_core0,
+    y0_core0), by an offset that grows/decays exponentially with a
+    common (x/y-shared) energy scale Ec_core,
+
+        x0_core(e) = x0_core0 + x0_delta * exp(Ec_core*(1/e - 1/e0))
+        y0_core(e) = y0_core0 + y0_delta * exp(Ec_core*(1/e - 1/e0))
+
+    (the 1/e0 term only sets the offset's normalization, so that at
+    e = e0 it is exactly x0_delta / y0_delta; it does not make
+    x0_core(e0) equal to x0_core0 by itself, since the offset does not
+    vanish at e0). x0_delta = y0_delta = 0 recovers a fixed core
+    center (x0_core0, y0_core0) with no energy dependence, regardless
+    of Ec_core.
+
+    The tail's width (sigma_tail) has no energy dependence, but its
+    eccentricity does, through a logistic (sigmoid) function of
+    log(e/e0),
 
         ecc_tail(e) = sigmoid(logit(ecc_tail0) + delta_ecc_tail*log(e/e0))
 
@@ -241,11 +256,14 @@ def camera_response(x, y, e,
         Camera plane coordinates.
     e: array_like
         Energy.
-    sigma_core0, delta_sigma_core, x0_core, y0_core: array_like
+    sigma_core0, delta_sigma_core, x0_core0, y0_core0, x0_delta, y0_delta, Ec_core: array_like
         Parameters of the Gaussian core (a super_gaussian() with
         p = 1, ecc = 0, phi = 0). sigma_core0 is its width at e = e0,
         and delta_sigma_core its power-law energy dependence (see
-        above); x0_core, y0_core its center.
+        above); x0_core0, y0_core0 its base center, x0_delta, y0_delta
+        the amplitude of its energy-dependent offset from that base,
+        and Ec_core the (shared, x/y-common) energy scale of that
+        offset (see above).
     sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail, x0_tail, y0_tail: array_like
         Parameters of the King function tail, see king_function().
         ecc_tail0 is its eccentricity at e = e0, and delta_ecc_tail its
@@ -262,6 +280,10 @@ def camera_response(x, y, e,
         Camera response value.
     """
     sigma_core = sigma_core0 * np.power(e/e0, delta_sigma_core)
+
+    core_shift = np.exp(Ec_core*(1/e - 1/e0))
+    x0_core = x0_core0 + x0_delta*core_shift
+    y0_core = y0_core0 + y0_delta*core_shift
 
     ecc_tail_logit0 = np.log(ecc_tail0 / (1 - ecc_tail0))
     ecc_tail = 1 / (1 + np.exp(-(ecc_tail_logit0 + delta_ecc_tail*np.log(e/e0))))
@@ -620,7 +642,8 @@ f"""{type(self).__name__} instance
         ----------
         p0: array_like
             Initial guess for the camera_response() fit parameters
-            (sigma_core0, delta_sigma_core, x0_core, y0_core,
+            (sigma_core0, delta_sigma_core, x0_core0, y0_core0,
+            x0_delta, y0_delta, Ec_core,
             sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail,
             x0_tail, y0_tail, w, norm, e0, alpha, beta).
             x, y and e (camera coordinates and energy) are not fitted:
