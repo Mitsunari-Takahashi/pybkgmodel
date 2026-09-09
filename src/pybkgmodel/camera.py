@@ -195,7 +195,7 @@ def low_energy_cutoff(e, eth, s):
 
 def camera_response(x, y, e,
                      sigma_core0, delta_sigma_core, x0_core, y0_core,
-                     sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail,
+                     sigma_tail, gamma_tail, ecc_tail, phi_tail,
                      w0, delta_w,
                      norm, e0, alpha, beta):
     """
@@ -223,23 +223,13 @@ def camera_response(x, y, e,
     = 0 recovers an energy-independent core width. The core's center
     (x0_core, y0_core) itself has no energy dependence.
 
-    The tail's width (sigma_tail) has no energy dependence, but its
-    eccentricity does, through a logistic (sigmoid) function of
-    log(e/e0),
+    The tail's width (sigma_tail) and eccentricity (ecc_tail) have no
+    energy dependence.
 
-        ecc_tail(e) = sigmoid(logit(ecc_tail0) + delta_ecc_tail*log(e/e0))
-
-    where logit(p) = log(p/(1-p)) and sigmoid = logit's inverse. This
-    is the eccentricity analog of the sigma_core(e) power law above:
-    the lowest-order (linear in log(e/e0)) energy dependence that
-    still keeps ecc_tail(e) within its valid (0, 1) range at all
-    energies (a plain linear or power-law term could not, since
-    eccentricity is bounded on both sides). ecc_tail(e0) = ecc_tail0
-    exactly, and delta_ecc_tail = 0 recovers an energy-independent
-    tail eccentricity.
-
-    The core fraction w is bounded the same way (0, 1) and uses the
-    same logistic construction,
+    The core fraction w is bounded to (0, 1) and uses a logistic
+    (sigmoid) construction of log(e/e0) to keep it there at all
+    energies (a plain linear or power-law term could not, since it is
+    bounded on both sides),
 
         w(e) = sigmoid(logit(w0) + delta_w*log(e/e0))
 
@@ -257,11 +247,9 @@ def camera_response(x, y, e,
         p = 1, ecc = 0, phi = 0). sigma_core0 is its width at e = e0,
         and delta_sigma_core its power-law energy dependence (see
         above); x0_core, y0_core its (energy-independent) center.
-    sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail: array_like
+    sigma_tail, gamma_tail, ecc_tail, phi_tail: array_like
         Parameters of the King function tail, see king_function(),
-        fixed at the camera center (0, 0). ecc_tail0 is its
-        eccentricity at e = e0, and delta_ecc_tail its logistic energy
-        dependence (see above).
+        fixed at the camera center (0, 0).
     w0, delta_w: array_like
         Fraction (0 < w < 1) of the spatial distribution's weight in
         the core, vs. (1 - w) in the tail (see above). w0 is its value
@@ -276,9 +264,6 @@ def camera_response(x, y, e,
         Camera response value.
     """
     sigma_core = sigma_core0 * np.power(e/e0, delta_sigma_core)
-
-    ecc_tail_logit0 = np.log(ecc_tail0 / (1 - ecc_tail0))
-    ecc_tail = 1 / (1 + np.exp(-(ecc_tail_logit0 + delta_ecc_tail*np.log(e/e0))))
 
     w_logit0 = np.log(w0 / (1 - w0))
     w = 1 / (1 + np.exp(-(w_logit0 + delta_w*np.log(e/e0))))
@@ -638,7 +623,7 @@ f"""{type(self).__name__} instance
         p0: array_like
             Initial guess for the camera_response() fit parameters
             (sigma_core0, delta_sigma_core, x0_core, y0_core,
-            sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail,
+            sigma_tail, gamma_tail, ecc_tail, phi_tail,
             w0, delta_w, norm, e0, alpha, beta).
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,

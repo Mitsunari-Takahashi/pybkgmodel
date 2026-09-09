@@ -27,10 +27,8 @@ from pybkgmodel.camera import RectangularCameraImage
 # sigma_core0, delta_sigma_core, x0_core, y0_core: Gaussian core
 #   (camera acceptance shape's central component); x0_core/y0_core its
 #   (energy-independent) center.
-# sigma_tail, gamma_tail, ecc_tail0, delta_ecc_tail, phi_tail: King
-#   function tail (extended halo component), fixed at the camera
-#   center; ecc_tail0/delta_ecc_tail set its energy-dependent
-#   eccentricity.
+# sigma_tail, gamma_tail, ecc_tail, phi_tail: King function tail
+#   (extended halo component), fixed at the camera center.
 # w0, delta_w: fraction of the spatial distribution's weight in the
 #   core, and its energy dependence.
 # (the linear function of y has both its slope and intercept fixed,
@@ -66,11 +64,7 @@ def default_camera_response_guess(bkg_map):
 
     sigma_tail0 = x_range / 2
     gamma_tail0 = 2.0
-    # Kept strictly away from 0/1: ecc_tail's logit-space energy
-    # dependence (see camera_response()) is undefined exactly at the
-    # boundary and has a vanishing gradient near it.
     ecc_tail0 = 0.1
-    delta_ecc_tail0 = 0.0
     phi_tail0 = 0.0
 
     w0 = 0.5
@@ -93,7 +87,7 @@ def default_camera_response_guess(bkg_map):
 
     p0 = [
         sigma_core0, delta_sigma_core0, x0_core0, y0_core0,
-        sigma_tail0, gamma_tail0, ecc_tail0, delta_ecc_tail0, phi_tail0,
+        sigma_tail0, gamma_tail0, ecc_tail0, phi_tail0,
         w0, delta_w0,
         norm0, e0_guess, alpha0, beta0,
     ]
@@ -105,8 +99,7 @@ def default_camera_response_guess(bkg_map):
         (y_min, y_max),                    # y0_core
         (sigma_tail0 / 10, sigma_tail0 * 10),  # sigma_tail
         (1.01, 10.0),                       # gamma_tail
-        (0.01, 0.9),                       # ecc_tail0 (kept off the 0/1 logit boundary)
-        (-3.0, 3.0),                       # delta_ecc_tail
+        (0.0, 0.9),                        # ecc_tail
         (-np.pi / 2, np.pi / 2),           # phi_tail
         (0.01, 0.99),                      # w0 (kept off the 0/1 logit boundary)
         (-10.0, -0.001),                       # delta_w
@@ -123,7 +116,7 @@ def default_camera_response_guess(bkg_map):
 # fitted_differential_rate()); used to label the printed fit output.
 CAMERA_RESPONSE_PARAM_NAMES = (
     'sigma_core0', 'delta_sigma_core', 'x0_core', 'y0_core',
-    'sigma_tail', 'gamma_tail', 'ecc_tail0', 'delta_ecc_tail', 'phi_tail',
+    'sigma_tail', 'gamma_tail', 'ecc_tail', 'phi_tail',
     'w0', 'delta_w',
     'norm', 'e0', 'alpha', 'beta',
 )
