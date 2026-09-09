@@ -650,7 +650,10 @@ f"""{type(self).__name__} instance
             in the same order as p0. result.model_counts is the fitted
             camera_response(), multiplied by the exposure, evaluated on
             the pixel / energy bin centers of this image: a smooth count
-            map of the same shape as CameraImage.counts.
+            map of the same shape as CameraImage.counts -- additionally
+            rescaled per energy bin so that its sum over the unmasked
+            pixels exactly equals the observed counts' sum over the
+            same pixels (see mask, mask_half(), mask_region()).
         """
         x = ((self.xedges[1:] + self.xedges[:-1]) / 2).to_value(u.deg)
         y = ((self.yedges[1:] + self.yedges[:-1]) / 2).to_value(u.deg)
@@ -685,12 +688,28 @@ f"""{type(self).__name__} instance
         )
 
         result.model_counts = camera_response(xx, yy, ee, *result.x) * exposure
+
+        # Rescale the model, per energy bin, so that its sum over the
+        # unmasked pixels exactly matches the observed counts' sum
+        # over the same pixels. This removes any residual mismatch
+        # left by the smooth log_parabola energy shape not perfectly
+        # tracking the true spectrum bin-by-bin, while leaving the
+        # fitted spatial shape untouched. Uses the full pixel mask
+        # (not the fit's additional peak-and-above energy restriction
+        # above), so every energy bin is normalized this way.
+        mask_full = np.broadcast_to(self.mask, counts.shape)
+        data_sum = (counts * mask_full).sum(axis=(1, 2))
+        model_sum = (result.model_counts * mask_full).sum(axis=(1, 2))
+        scale = np.where(model_sum > 0, data_sum / np.where(model_sum > 0, model_sum, 1), 1.0)
+        result.model_counts = result.model_counts * scale[:, None, None]
+
         # Exposure-independent fitted rate (model_counts = model_rate *
         # exposure): unlike model_counts, this stays well-defined even
         # in pixels with zero exposure, and is what fitted_differential_rate()
         # / posterior_differential_rate() fall back to there instead of
-        # dividing by zero.
-        result.model_rate = camera_response(xx, yy, ee, *result.x) / u.s
+        # dividing by zero. The same per-energy-bin rescaling as
+        # model_counts above is applied here too, for consistency.
+        result.model_rate = camera_response(xx, yy, ee, *result.x) / u.s * scale[:, None, None]
 
         return result
 
