@@ -892,7 +892,8 @@ f"""{type(self).__name__} instance
         posterior_counts = self.posterior_counts(result, prior_strength=prior_strength)[energy_bin_id]
 
         pull = np.full(data_counts.shape, np.nan)
-        pull[mask] = (data_counts[mask] - posterior_counts[mask]) / posterior_counts[mask]
+        with np.errstate(invalid='ignore', divide='ignore'):
+            pull[mask] = (data_counts[mask] - posterior_counts[mask]) / posterior_counts[mask]
 
         with np.errstate(invalid='ignore', divide='ignore'):
             data = (data_counts / self.raw_exposure).to_value(val_unit)
@@ -977,7 +978,8 @@ f"""{type(self).__name__} instance
         # Residual in count space, summed over the unmasked pixels only.
         data_counts = self.counts.sum(axis=(1, 2))
         model_counts_unmasked = (posterior_counts * self.mask).sum(axis=(1, 2))
-        residual = (data_counts - model_counts_unmasked) / model_counts_unmasked
+        with np.errstate(invalid='ignore', divide='ignore'):
+            residual = (data_counts - model_counts_unmasked) / model_counts_unmasked
 
         # Displayed rate curves: per-pixel rate summed over energy,
         # with the Poisson counting variance propagated the same way
