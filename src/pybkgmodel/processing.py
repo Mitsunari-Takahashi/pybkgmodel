@@ -97,8 +97,10 @@ def default_camera_response_guess(bkg_map):
         (-3.0, 3.0),                       # delta_sigma_core
         (x_min, x_max),                    # x0_core
         (y_min, y_max),                    # y0_core
-        (sigma_tail0 / 10, sigma_tail0 * 10),  # sigma_tail
-        (1.01, 10.0),                       # gamma_tail
+        (sigma_tail0 / 5, x_range),         # sigma_tail (capped at the FOV extent:
+                                            # wider halos aren't constrained by the data)
+        (1.2, 10.0),                       # gamma_tail (kept off the near-singular
+                                            # King normalization at gamma -> 1)
         (0.0, 0.9),                        # ecc_tail
         (-np.pi / 2, np.pi / 2),           # phi_tail
         (0.01, 0.99),                      # w0 (kept off the 0/1 logit boundary)
