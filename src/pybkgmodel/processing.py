@@ -20,7 +20,7 @@ from pybkgmodel.message import message
 from pybkgmodel.model import (WobbleMap,
                               ExclusionMap
                             )
-from pybkgmodel.camera import RectangularCameraImage
+from pybkgmodel.camera import RectangularCameraImage, rebin_factor
 
 # Order of the camera_response() fit parameters, as expected by
 # CameraImage.fit_camera_response() / fitted_differential_rate().
@@ -128,6 +128,14 @@ CAMERA_RESPONSE_PARAM_NAMES = (
 # (as the data) into the Bayesian posterior background model written
 # out by write_maps(); see CameraImage.posterior_counts().
 POSTERIOR_PRIOR_STRENGTH = 10.0
+
+# Approximate spatial bin width of the background model written out by
+# write_maps(). Each bin of the configured (coarser) x/y binning is
+# split into the integer number of equal sub-bins whose width is
+# closest to this value (see pybkgmodel.camera.rebin_factor()), and its
+# posterior count is shared among them following the fitted
+# camera_response() shape (see CameraImage.rebinned_posterior()).
+REBIN_TARGET_WIDTH = 0.1 * u.deg
 
 # list of class attributes, which have a unit assigned
 quantity_list = [
@@ -490,6 +498,40 @@ class BkgMakerBase:
             pyplot.close(fig)
 
     @staticmethod
+    def save_rebinned_plots(fine_map, dnde, base_path, ax_unit='deg'):
+        """
+        Save images of the rebinned background model (see
+        CameraImage.rebinned_posterior()), one per energy bin, as a
+        visual check of the smoothing.
+
+        Parameters
+        ----------
+        fine_map : pybkgmodel.camera.CameraImage
+            Background map on the fine grid.
+        dnde : astropy.units.Quantity
+            Differential background rate on the fine grid, see
+            CameraImage.rebinned_posterior_differential_rate().
+        base_path : str
+            Output path without extension. '_map_rebinned_bin<i>.png'
+            is appended to it.
+        ax_unit : str
+            Unit to use for the x/y axes.
+        """
+        val_unit = '1 / (s * MeV * sr)'
+        for i in range(len(fine_map.energy_edges) - 1):
+            fig, ax = pyplot.subplots()
+            im = ax.pcolormesh(
+                fine_map.xedges.to_value(ax_unit),
+                fine_map.yedges.to_value(ax_unit),
+                dnde[i].to_value(val_unit).transpose()
+            )
+            ax.set_xlabel(f'X [{ax_unit}]')
+            ax.set_ylabel(f'Y [{ax_unit}]')
+            fig.colorbar(im, ax=ax, label=f'BKG [{val_unit}]')
+            fig.savefig(f"{base_path}_map_rebinned_bin{i}.png")
+            pyplot.close(fig)
+
+    @staticmethod
     def write_maps(bkg_maps, overwrite) -> None:
         """
         This method writes the generated bkgmaps to the corresponding output
@@ -505,6 +547,13 @@ class BkgMakerBase:
         what gets written out as the BKG column. If the fit does not
         converge, the map falls back to the raw counts-based rate
         (CameraImage.differential_rate()) and a warning is printed.
+
+        If the fit succeeded, the posterior is additionally rebinned
+        onto a finer spatial grid before writing: each configured x/y
+        bin is split into the integer number of sub-bins closest to
+        REBIN_TARGET_WIDTH, sharing the bin's posterior count among
+        them in proportion to the fitted camera_response() at the
+        sub-bin centers (see CameraImage.rebinned_posterior()).
 
         Diagnostic plot images (the rate map, and, if the fit
         succeeded, the posterior fit-quality checks) are saved
@@ -536,9 +585,6 @@ class BkgMakerBase:
                         p0, bounds=bounds, method=method, options=options
                     )
                     if fit_result.success:
-                        dnde = bkg_map.posterior_differential_rate(
-                            fit_result, prior_strength=POSTERIOR_PRIOR_STRENGTH
-                        )
                         break
                     fit_result = None
                 except Exception:  # pylint: disable=broad-except
@@ -558,7 +604,30 @@ class BkgMakerBase:
             base_path, _ = os.path.splitext(key)
             BkgMakerBase.save_diagnostic_plots(bkg_map, base_path, result=fit_result)
 
-            bkg_map.to_hdu(bkg_rate=dnde).writeto(key, overwrite=overwrite)
+            out_map = bkg_map
+            if fit_result is not None:
+                factor = (
+                    rebin_factor(bkg_map.xedges, REBIN_TARGET_WIDTH),
+                    rebin_factor(bkg_map.yedges, REBIN_TARGET_WIDTH),
+                )
+                if factor == (1, 1):
+                    dnde = bkg_map.posterior_differential_rate(
+                        fit_result, prior_strength=POSTERIOR_PRIOR_STRENGTH
+                    )
+                else:
+                    out_map, dnde = bkg_map.rebinned_posterior_differential_rate(
+                        fit_result, factor, prior_strength=POSTERIOR_PRIOR_STRENGTH
+                    )
+                    message(
+                        "Rebinning the background model: "
+                        f"x {np.diff(bkg_map.xedges)[0].to_value(u.deg):.3f} deg -> "
+                        f"{np.diff(out_map.xedges)[0].to_value(u.deg):.3f} deg (x{factor[0]}), "
+                        f"y {np.diff(bkg_map.yedges)[0].to_value(u.deg):.3f} deg -> "
+                        f"{np.diff(out_map.yedges)[0].to_value(u.deg):.3f} deg (x{factor[1]})"
+                    )
+                    BkgMakerBase.save_rebinned_plots(out_map, dnde, base_path)
+
+            out_map.to_hdu(bkg_rate=dnde).writeto(key, overwrite=overwrite)
 
 class Runwise(BkgMakerBase):
     """

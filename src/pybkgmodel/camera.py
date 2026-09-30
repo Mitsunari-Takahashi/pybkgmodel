@@ -279,6 +279,56 @@ def camera_response(x, y, e,
     )
 
 
+def rebin_factor(edges, target_width):
+    """
+    Number of equal sub-bins each bin of the given (uniform) binning
+    has to be split into, so that the sub-bin width is as close as
+    possible to target_width. At least 1 (no splitting).
+
+    Parameters
+    ----------
+    edges: astropy.units.Quantity
+        Uniform bin edges.
+    target_width: astropy.units.Quantity
+        Desired sub-bin width.
+
+    Returns
+    -------
+    factor: int
+        Number of sub-bins per bin.
+    """
+    widths = np.diff(edges)
+    if not np.allclose(widths, widths[0]):
+        raise ValueError("Rebinning requires uniform bin edges.")
+
+    ratio = (widths[0] / target_width).decompose().value
+
+    return max(1, int(round(ratio)))
+
+
+def subdivide_edges(edges, factor):
+    """
+    Split every bin of the given binning linearly into factor equal
+    sub-bins.
+
+    Parameters
+    ----------
+    edges: astropy.units.Quantity
+        Bin edges.
+    factor: int
+        Number of sub-bins per bin.
+
+    Returns
+    -------
+    fine_edges: astropy.units.Quantity
+        Sub-bin edges, (len(edges) - 1) * factor + 1 of them.
+    """
+    frac = np.arange(factor) / factor
+    fine = edges[:-1, None] + np.diff(edges)[:, None] * frac[None, :]
+
+    return np.concatenate((fine.ravel(), edges[-1:]))
+
+
 def solid_angle_lat_lon_rectangle(theta_E, theta_W, phi_N, phi_S):
     """
     Calculate the solid angle of a latitude-longitude rectangle on a globe.
@@ -591,10 +641,7 @@ f"""{type(self).__name__} instance
         """
         result = self.fit_camera_response(p0, bounds=bounds, method=method, **kwargs)
 
-        emin = self.energy_edges[:-1]
-        emax = self.energy_edges[1:]
-        e0 = (emin * emax)**0.5
-        int2diff = (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
+        int2diff = self._int2diff(index)
 
         # Using model_rate (exposure-independent) directly, rather than
         # model_counts / exposure, avoids a 0/0 division in pixels with
@@ -837,15 +884,125 @@ f"""{type(self).__name__} instance
             Posterior differential rate, of the same shape as the
             camera image, see differential_rate().
         """
-        emin = self.energy_edges[:-1]
-        emax = self.energy_edges[1:]
-        e0 = (emin * emax)**0.5
-        int2diff = (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
+        int2diff = self._int2diff(index)
 
         rate = self.posterior_rate(result, prior_strength=prior_strength) / self.pixel_area
         dnde = rate * int2diff[:, None, None]
 
         return dnde
+
+    def _int2diff(self, index):
+        """
+        Conversion factor, per energy bin, from counts integrated over
+        the bin to the differential value at e0 = (emin * emax)**0.5,
+        assuming a power law of the given spectral index (see
+        differential_rate()).
+        """
+        emin = self.energy_edges[:-1]
+        emax = self.energy_edges[1:]
+        e0 = (emin * emax)**0.5
+        return (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
+
+    def rebinned_posterior(self, result, factor, prior_strength=1.0):
+        """
+        Bayesian posterior counts / rate (see posterior_counts(),
+        posterior_rate()), redistributed onto a finer spatial grid.
+
+        Each pixel of this image is split into kx x ky equal sub-pixels
+        (see subdivide_edges()). Its posterior count is shared among
+        them in proportion to the fitted camera_response() evaluated at
+        each sub-pixel center, normalized within the parent pixel, so
+        that the sub-pixel values sum exactly to the parent's posterior
+        count. Every sub-pixel inherits its parent's exposure and mask.
+        The energy binning is left unchanged.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), see posterior_counts().
+        factor: tuple of int
+            Number of sub-pixels (kx, ky) per pixel along x and y,
+            see rebin_factor().
+        prior_strength: float
+            Prior weight, see posterior_counts().
+
+        Returns
+        -------
+        fine_image: CameraImage
+            Image of the same type on the fine grid, holding the
+            redistributed posterior counts.
+        rate: array_like astropy.unit.Quantity
+            Redistributed posterior rate, of the same shape as
+            fine_image.counts.
+        """
+        kx, ky = factor
+        n_e = len(self.energy_edges) - 1
+        nx = len(self.xedges) - 1
+        ny = len(self.yedges) - 1
+
+        xedges = subdivide_edges(self.xedges, kx)
+        yedges = subdivide_edges(self.yedges, ky)
+
+        x = ((xedges[1:] + xedges[:-1]) / 2).to_value(u.deg)
+        y = ((yedges[1:] + yedges[:-1]) / 2).to_value(u.deg)
+        e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(u.TeV)
+        ee, xx, yy = np.meshgrid(e, x, y, indexing='ij')
+
+        # Sharing weights of the sub-pixels within each parent pixel,
+        # from the fitted model shape at the sub-pixel centers.
+        shape = camera_response(xx, yy, ee, *result.x).reshape((n_e, nx, kx, ny, ky))
+        total = shape.sum(axis=(2, 4), keepdims=True)
+        valid = np.isfinite(total) & (total > 0)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            weights = np.where(valid, shape / np.where(valid, total, 1), 1 / (kx * ky))
+
+        def split(values):
+            fine = values[:, :, None, :, None] * weights
+            return fine.reshape((n_e, nx * kx, ny * ky))
+
+        counts = split(self.posterior_counts(result, prior_strength=prior_strength))
+        rate = split(self.posterior_rate(result, prior_strength=prior_strength))
+
+        mask = np.repeat(np.repeat(self.mask, kx, axis=0), ky, axis=1)
+        exposure = np.repeat(np.repeat(self.raw_exposure, kx, axis=0), ky, axis=1)
+
+        fine_image = type(self)(
+            counts, xedges, yedges, self.energy_edges,
+            center=self.center, mask=mask, exposure=exposure
+        )
+
+        return fine_image, rate
+
+    def rebinned_posterior_differential_rate(self, result, factor, prior_strength=1.0, index=-2):
+        """
+        Same as posterior_differential_rate(), but on the finer spatial
+        grid of rebinned_posterior().
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), see posterior_counts().
+        factor: tuple of int
+            Number of sub-pixels (kx, ky) per pixel along x and y,
+            see rebinned_posterior().
+        prior_strength: float
+            Prior weight, see posterior_counts().
+        index: float
+            Power law spectral index, see differential_rate().
+            Defaults to -2.
+
+        Returns
+        -------
+        fine_image: CameraImage
+            Image on the fine grid, see rebinned_posterior().
+        dnde: array_like astropy.unit.Quantity
+            Posterior differential rate, of the same shape as
+            fine_image.counts.
+        """
+        fine_image, rate = self.rebinned_posterior(result, factor, prior_strength=prior_strength)
+        dnde = rate / fine_image.pixel_area * self._int2diff(index)[:, None, None]
+
+        return fine_image, dnde
 
     def plot_fit_check(self, result, energy_bin_id=0, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1/s'):
         """
