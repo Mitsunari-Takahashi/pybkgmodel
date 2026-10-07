@@ -127,7 +127,7 @@ CAMERA_RESPONSE_PARAM_NAMES = (
 # the camera_response() fit (as the prior) with the observed counts
 # (as the data) into the Bayesian posterior background model written
 # out by write_maps(); see CameraImage.posterior_counts().
-POSTERIOR_PRIOR_STRENGTH = 10.0
+POSTERIOR_PRIOR_STRENGTH = 25.0
 
 # Approximate spatial bin width of the background model written out by
 # write_maps(). Each bin of the configured (coarser) x/y binning is
@@ -452,7 +452,7 @@ class BkgMakerBase:
         return stacked_map
 
     @staticmethod
-    def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=POSTERIOR_PRIOR_STRENGTH):
+    def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=POSTERIOR_PRIOR_STRENGTH, factor=None):
         """
         Save diagnostic plot images for a single background map: the
         observed rate map (CameraImage.plot()) for every energy bin,
@@ -479,6 +479,11 @@ class BkgMakerBase:
             Prior weight passed to plot_fit_check() /
             plot_fit_spectrum() (see CameraImage.posterior_counts()).
             Defaults to POSTERIOR_PRIOR_STRENGTH.
+        factor : tuple of int, optional
+            Rebinning factor (kx, ky) of the background model written
+            out, passed to plot_fit_check() to also show the rebinned
+            posterior (see CameraImage.rebinned_posterior()). If None
+            (default), no rebinned map is shown.
         """
         n_ebins = len(bkg_map.energy_edges) - 1
 
@@ -488,7 +493,7 @@ class BkgMakerBase:
             pyplot.close(pyplot.gcf())
 
             if result is not None:
-                fig, _ = bkg_map.plot_fit_check(result, energy_bin_id=i, prior_strength=prior_strength)
+                fig, _ = bkg_map.plot_fit_check(result, energy_bin_id=i, factor=factor, prior_strength=prior_strength)
                 fig.savefig(f"{base_path}_fit_check_bin{i}.png")
                 pyplot.close(fig)
 
@@ -601,15 +606,21 @@ class BkgMakerBase:
                 for name, val in zip(CAMERA_RESPONSE_PARAM_NAMES, fit_result.x):
                     print(f"    {name:12s} = {val: .6g}")
 
-            base_path, _ = os.path.splitext(key)
-            BkgMakerBase.save_diagnostic_plots(bkg_map, base_path, result=fit_result)
-
-            out_map = bkg_map
+            factor = None
             if fit_result is not None:
                 factor = (
                     rebin_factor(bkg_map.xedges, REBIN_TARGET_WIDTH),
                     rebin_factor(bkg_map.yedges, REBIN_TARGET_WIDTH),
                 )
+
+            base_path, _ = os.path.splitext(key)
+            BkgMakerBase.save_diagnostic_plots(
+                bkg_map, base_path, result=fit_result,
+                factor=None if factor == (1, 1) else factor
+            )
+
+            out_map = bkg_map
+            if fit_result is not None:
                 if factor == (1, 1):
                     dnde = bkg_map.posterior_differential_rate(
                         fit_result, prior_strength=POSTERIOR_PRIOR_STRENGTH

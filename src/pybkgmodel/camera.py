@@ -1004,7 +1004,7 @@ f"""{type(self).__name__} instance
 
         return fine_image, dnde
 
-    def plot_fit_check(self, result, energy_bin_id=0, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1/s'):
+    def plot_fit_check(self, result, energy_bin_id=0, factor=None, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1 / (s deg2)'):
         """
         Plot a spatial comparison between the observed rate and the
         Bayesian posterior rate (see posterior_rate()) -- the
@@ -1012,13 +1012,16 @@ f"""{type(self).__name__} instance
         prior, updated bin-by-bin against the observed data -- for one
         energy bin, as a visual check of the fit quality.
 
-        Produces three panels: the observed rate, the posterior rate
-        and the residuals, expressed as the relative residual
-        (data - posterior) / posterior. Masked pixels (see mask,
-        mask_half(), mask_region()) are left blank in the data and
-        residual panels (there is no trustworthy data to show or check
-        there), but the posterior panel shows the actual
-        posterior_rate() value there too (the prior, unaffected by
+        Produces a 2x2 grid of panels: the observed rate, the posterior
+        rate, the posterior rate rebinned onto the finer grid (see
+        rebinned_posterior()) and the residuals on the original grid,
+        expressed as the relative residual (data - posterior) /
+        posterior. The rates are shown per unit solid angle, so the
+        maps on the original and the fine grid share one color scale.
+        Masked pixels (see mask, mask_half(), mask_region()) are left
+        blank in the data and residual panels (there is no trustworthy
+        data to show or check there), but the posterior panels show the
+        actual posterior value there too (the prior, unaffected by
         data) -- the same rate written out for that pixel by
         pybkgmodel.processing.BkgMakerBase.write_maps().
 
@@ -1029,6 +1032,10 @@ f"""{type(self).__name__} instance
             attribute of the same shape as CameraImage.counts.
         energy_bin_id: int
             Energy bin to plot.
+        factor: tuple of int, optional
+            Number of sub-pixels (kx, ky) per pixel for the rebinned
+            panel, see rebinned_posterior(). If None (default), that
+            panel is left empty.
         ax_unit: str
             Unit to use for the x/y axes.
         cmap: str
@@ -1037,48 +1044,71 @@ f"""{type(self).__name__} instance
             Prior weight passed to posterior_counts() / posterior_rate().
             Defaults to 10.0.
         val_unit: str
-            Unit to use for the data/posterior rate maps.
+            Unit to use for the data/posterior rate maps (rate per
+            solid angle).
 
         Returns
         -------
-        fig, axes: matplotlib figure and array of 3 axes
-            (data, posterior, pull).
+        fig, axes: matplotlib figure and 2x2 array of axes
+            ((data, posterior), (rebinned posterior, residual)).
         """
         mask = self.mask
         data_counts = self.counts[energy_bin_id]
         posterior_counts = self.posterior_counts(result, prior_strength=prior_strength)[energy_bin_id]
+        pixel_area = self.pixel_area
 
         pull = np.full(data_counts.shape, np.nan)
         with np.errstate(invalid='ignore', divide='ignore'):
             pull[mask] = (data_counts[mask] - posterior_counts[mask]) / posterior_counts[mask]
 
         with np.errstate(invalid='ignore', divide='ignore'):
-            data = (data_counts / self.raw_exposure).to_value(val_unit)
-        model = self.posterior_rate(result, prior_strength=prior_strength)[energy_bin_id].to_value(val_unit)
+            data = (data_counts / self.raw_exposure / pixel_area).to_value(val_unit)
+        data[~mask] = np.nan
+        model = (self.posterior_rate(result, prior_strength=prior_strength)[energy_bin_id] / pixel_area).to_value(val_unit)
 
-        xedges = self.xedges.to_value(ax_unit)
-        yedges = self.yedges.to_value(ax_unit)
+        panels = [
+            (self.xedges, self.yedges, data, f'Data rate [{val_unit}]'),
+            (self.xedges, self.yedges, model, f'Posterior rate [{val_unit}]'),
+        ]
 
-        vmax = max(np.nanmax(data), model.max())
+        if factor is not None:
+            fine_image, fine_rate = self.rebinned_posterior(result, factor, prior_strength=prior_strength)
+            fine_model = (fine_rate[energy_bin_id] / fine_image.pixel_area).to_value(val_unit)
+            fine_width = np.diff(fine_image.xedges)[0].to_value(ax_unit)
+            panels.append((
+                fine_image.xedges, fine_image.yedges, fine_model,
+                f'Rebinned posterior rate ({fine_width:.3g} {ax_unit}) [{val_unit}]'
+            ))
+        else:
+            fine_model = model
+
+        vmax = max(np.nanmax(data), model.max(), fine_model.max())
         pmax = np.nanmax(np.abs(pull)) if np.any(mask) else 1
 
-        fig, axes = pyplot.subplots(1, 3, figsize=(15, 4))
+        fig, axes = pyplot.subplots(2, 2, figsize=(12, 9))
+        flat_axes = axes.ravel()
 
-        for ax, val, title, kwargs in zip(
-            axes,
-            (data, model, pull),
-            (f'Data rate [{val_unit}]', f'Posterior rate [{val_unit}]', 'Residual: (data - posterior) / posterior'),
-            (
-                dict(vmin=0, vmax=vmax, cmap=cmap),
-                dict(vmin=0, vmax=vmax, cmap=cmap),
-                dict(vmin=-pmax, vmax=pmax, cmap='coolwarm')
+        for ax, (xedges, yedges, val, title) in zip(flat_axes[:len(panels)], panels):
+            im = ax.pcolormesh(
+                xedges.to_value(ax_unit), yedges.to_value(ax_unit), val.transpose(),
+                vmin=0, vmax=vmax, cmap=cmap
             )
-        ):
-            im = ax.pcolormesh(xedges, yedges, val.transpose(), **kwargs)
             ax.set_title(title)
+            fig.colorbar(im, ax=ax)
+
+        if factor is None:
+            flat_axes[2].set_visible(False)
+
+        im = flat_axes[3].pcolormesh(
+            self.xedges.to_value(ax_unit), self.yedges.to_value(ax_unit), pull.transpose(),
+            vmin=-pmax, vmax=pmax, cmap='coolwarm'
+        )
+        flat_axes[3].set_title('Residual: (data - posterior) / posterior')
+        fig.colorbar(im, ax=flat_axes[3])
+
+        for ax in flat_axes:
             ax.set_xlabel(f'X [{ax_unit}]')
             ax.set_ylabel(f'Y [{ax_unit}]')
-            fig.colorbar(im, ax=ax)
 
         emin = self.energy_edges[energy_bin_id]
         emax = self.energy_edges[energy_bin_id + 1]
