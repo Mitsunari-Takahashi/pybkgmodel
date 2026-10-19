@@ -129,12 +129,6 @@ CAMERA_RESPONSE_PARAM_NAMES = (
 # out by write_maps(); see CameraImage.posterior_counts().
 POSTERIOR_PRIOR_STRENGTH = 25.0
 
-# Spatial (x/y) bin width of the background maps. The configured
-# min/max range of each axis is split into the integer number of equal
-# bins whose width is closest to this value; the configured nbins is
-# not used.
-SPATIAL_BIN_WIDTH = 0.1 * u.deg
-
 # Neighbourhood of the moving average applied to the posterior
 # background model written out by write_maps(): pixels whose centers,
 # seen from the fitted Gaussian core peak, are within
@@ -251,16 +245,12 @@ class BkgMakerBase:
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity
@@ -288,9 +278,17 @@ class BkgMakerBase:
         self.out_prefix     = out_prefix
         self.overwrite      = overwrite
 
-        self.x_edges        = self.spatial_edges(x_min, x_max, x_nbins, 'x')
+        self.x_edges        = np.linspace(
+                                x_min,
+                                x_max,
+                                x_nbins+1
+                                )
 
-        self.y_edges        = self.spatial_edges(y_min, y_max, y_nbins, 'y')
+        self.y_edges        = np.linspace(
+                                y_min,
+                                y_max,
+                                y_nbins+1
+                                )
 
         self.e_edges        = np.geomspace(
                                 e_min,
@@ -302,37 +300,6 @@ class BkgMakerBase:
 
         self._bkg_map_maker = None
 
-
-    @staticmethod
-    def spatial_edges(x_min, x_max, nbins, name):
-        """
-        Uniform bin edges between x_min and x_max, with the integer
-        number of bins whose width is closest to SPATIAL_BIN_WIDTH.
-
-        Parameters
-        ----------
-        x_min, x_max : astropy.units.quantity.Quantity
-            Range of the axis.
-        nbins : int
-            Number of bins given in the configuration file. Not used,
-            only reported if it differs from the one used.
-        name : str
-            Axis name, used in the report.
-
-        Returns
-        -------
-        edges : astropy.units.quantity.Quantity
-            Bin edges.
-        """
-        n = max(1, int(round(((x_max - x_min) / SPATIAL_BIN_WIDTH).decompose().value)))
-
-        if n != nbins:
-            message(
-                f"Using {n} bins of {((x_max - x_min) / n).to(u.deg):.3f} along {name} "
-                f"instead of the configured nbins = {nbins}."
-            )
-
-        return np.linspace(x_min, x_max, n + 1)
 
     @property
     def bkg_map_maker(self):
@@ -743,16 +710,12 @@ class RunwiseWobbleMap(Runwise):
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity
@@ -878,16 +841,12 @@ class StackedWobbleMap(Stacked):
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity
@@ -1016,16 +975,12 @@ class RunwiseExclusionMap(Runwise):
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity
@@ -1160,16 +1115,12 @@ class StackedExclusionMap(Stacked):
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
-            Not used: the number of bins follows from
-            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity

@@ -8,6 +8,7 @@ from astropy.wcs import WCS
 
 from astropy.coordinates import SkyCoord, Angle
 from matplotlib import pyplot
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 def king_function(x, y, sigma, gamma, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
@@ -332,6 +333,38 @@ def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr):
         averaged = averaged * unit
 
     return averaged
+
+
+def merged_bin_starts(edges, min_width):
+    """
+    Start indices of groups of consecutive bins to merge, so that every
+    merged bin is at least min_width wide (to be used with
+    numpy.add.reduceat). Bins are merged only if they are narrower than
+    min_width; a leftover group of fewer bins at the end is merged into
+    the preceding group. Assumes uniform bins.
+
+    Parameters
+    ----------
+    edges: astropy.units.Quantity
+        Uniform bin edges.
+    min_width: astropy.units.Quantity
+        Minimal width of the merged bins.
+
+    Returns
+    -------
+    starts: numpy.ndarray
+        Index of the first bin of each group.
+    """
+    n = len(edges) - 1
+    # Small tolerance, so that e.g. 3 bins of 0.1 deg count as 0.3 deg.
+    ratio = (min_width / (edges[1] - edges[0])).decompose().value
+    k = max(1, int(np.ceil(ratio - 1e-9)))
+
+    starts = np.arange(0, n, k)
+    if len(starts) > 1 and n - starts[-1] < k:
+        starts = starts[:-1]
+
+    return starts
 
 
 def solid_angle_lat_lon_rectangle(theta_E, theta_W, phi_N, phi_S):
@@ -1019,7 +1052,7 @@ f"""{type(self).__name__} instance
 
         return rate / self.pixel_area * self._int2diff(index)[:, None, None]
 
-    def plot_fit_check(self, result, energy_bin_id=0, smoothing=None, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1 / (s deg2)'):
+    def plot_fit_check(self, result, energy_bin_id=0, smoothing=None, residual_min_width=0.3*u.deg, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1 / (s deg2)'):
         """
         Plot a spatial comparison between the observed rate and the
         Bayesian posterior rate (see posterior_rate()) -- the
@@ -1032,8 +1065,13 @@ f"""{type(self).__name__} instance
         smoothed_posterior_rate()) and the residuals, expressed as the
         relative residual (data - smoothed) / smoothed in counts (or
         (data - posterior) / posterior if no smoothing is given). The
-        rates are shown per unit solid angle and share one color
-        scale.
+        rates are shown per unit solid angle; the data and posterior
+        maps share one color scale, while the smoothed map is scaled
+        from 0 to its own maximum. The residual is computed and shown
+        on a coarser grid, merging consecutive pixels (see
+        merged_bin_starts()) narrower than residual_min_width, summing
+        the counts of the unmasked pixels only. Each panel has the
+        aspect ratio of the x/y ranges.
         Masked pixels (see mask, mask_half(), mask_region()) are left
         blank in the data and residual panels (there is no trustworthy
         data to show or check there), but the posterior panels show the
@@ -1054,6 +1092,10 @@ f"""{type(self).__name__} instance
             is also used as the model of the residual panel. If None
             (default), that panel is left empty and the residual is
             computed against the unsmoothed posterior.
+        residual_min_width: astropy.units.Quantity
+            Minimal pixel width of the residual panel. Pixels narrower
+            than this are merged before computing the residual.
+            Defaults to 0.3 deg.
         ax_unit: str
             Unit to use for the x/y axes.
         cmap: str
@@ -1077,57 +1119,72 @@ f"""{type(self).__name__} instance
         if smoothing is not None:
             smoothed_rate = self.smoothed_posterior_rate(result, prior_strength=prior_strength, **smoothing)[energy_bin_id]
             model_counts = (smoothed_rate * self.raw_exposure).decompose().value
-            residual_title = 'Residual: (data - smoothed) / smoothed'
+            residual_name = 'smoothed'
         else:
             model_counts = self.posterior_counts(result, prior_strength=prior_strength)[energy_bin_id]
-            residual_title = 'Residual: (data - posterior) / posterior'
+            residual_name = 'posterior'
 
-        pull = np.full(data_counts.shape, np.nan)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            pull[mask] = (data_counts[mask] - model_counts[mask]) / model_counts[mask]
+        # Residual on a coarser grid, summing over the unmasked pixels
+        # of each merged pixel.
+        xstarts = merged_bin_starts(self.xedges, residual_min_width)
+        ystarts = merged_bin_starts(self.yedges, residual_min_width)
+
+        def merge(values):
+            return np.add.reduceat(np.add.reduceat(values, xstarts, axis=0), ystarts, axis=1)
+
+        res_xedges = self.xedges[np.append(xstarts, len(self.xedges) - 1)]
+        res_yedges = self.yedges[np.append(ystarts, len(self.yedges) - 1)]
+        merged_data = merge(np.where(mask, data_counts, 0))
+        merged_model = merge(np.where(mask, model_counts, 0))
+        merged_valid = (merge(mask.astype(int)) > 0) & (merged_model > 0)
+
+        pull = np.full(merged_data.shape, np.nan)
+        pull[merged_valid] = (merged_data[merged_valid] - merged_model[merged_valid]) / merged_model[merged_valid]
 
         with np.errstate(invalid='ignore', divide='ignore'):
             data = (data_counts / self.raw_exposure / pixel_area).to_value(val_unit)
         data[~mask] = np.nan
         model = (self.posterior_rate(result, prior_strength=prior_strength)[energy_bin_id] / pixel_area).to_value(val_unit)
 
+        vmax = max(np.nanmax(data), model.max())
+
         panels = [
-            (self.xedges, self.yedges, data, f'Data rate [{val_unit}]'),
-            (self.xedges, self.yedges, model, f'Posterior rate [{val_unit}]'),
+            (self.xedges, self.yedges, data, f'Data rate [{val_unit}]', dict(vmin=0, vmax=vmax, cmap=cmap)),
+            (self.xedges, self.yedges, model, f'Posterior rate [{val_unit}]', dict(vmin=0, vmax=vmax, cmap=cmap)),
         ]
 
         if smoothing is not None:
             smoothed = (smoothed_rate / pixel_area).to_value(val_unit)
-            panels.append((self.xedges, self.yedges, smoothed, f'Smoothed posterior rate [{val_unit}]'))
+            panels.append((
+                self.xedges, self.yedges, smoothed, f'Smoothed posterior rate [{val_unit}]',
+                dict(vmin=0, vmax=smoothed.max(), cmap=cmap)
+            ))
         else:
-            smoothed = model
+            panels.append(None)
 
-        vmax = max(np.nanmax(data), model.max(), smoothed.max())
+        res_width = np.diff(res_xedges).min().to_value(ax_unit)
+        panels.append((
+            res_xedges, res_yedges, pull,
+            f'Residual ({res_width:.2g} {ax_unit} bins)\n(data - {residual_name}) / {residual_name}',
+            dict(vmin=-2, vmax=2, cmap='coolwarm')
+        ))
 
-        fig, axes = pyplot.subplots(2, 2, figsize=(12, 9))
-        flat_axes = axes.ravel()
+        fig, axes = pyplot.subplots(2, 2, figsize=(12, 10))
 
-        for ax, (xedges, yedges, val, title) in zip(flat_axes[:len(panels)], panels):
-            im = ax.pcolormesh(
-                xedges.to_value(ax_unit), yedges.to_value(ax_unit), val.transpose(),
-                vmin=0, vmax=vmax, cmap=cmap
-            )
+        for ax, panel in zip(axes.ravel(), panels):
+            if panel is None:
+                ax.set_visible(False)
+                continue
+
+            xedges, yedges, val, title, kwargs = panel
+            im = ax.pcolormesh(xedges.to_value(ax_unit), yedges.to_value(ax_unit), val.transpose(), **kwargs)
             ax.set_title(title)
-            fig.colorbar(im, ax=ax)
-
-        if smoothing is None:
-            flat_axes[2].set_visible(False)
-
-        im = flat_axes[3].pcolormesh(
-            self.xedges.to_value(ax_unit), self.yedges.to_value(ax_unit), pull.transpose(),
-            vmin=-2, vmax=2, cmap='coolwarm'
-        )
-        flat_axes[3].set_title(residual_title)
-        fig.colorbar(im, ax=flat_axes[3])
-
-        for ax in flat_axes:
             ax.set_xlabel(f'X [{ax_unit}]')
             ax.set_ylabel(f'Y [{ax_unit}]')
+            ax.set_aspect('equal')
+            # Colorbar axis of the same height as the (equal-aspect) panel.
+            cax = make_axes_locatable(ax).append_axes('right', size='5%', pad=0.1)
+            fig.colorbar(im, cax=cax)
 
         emin = self.energy_edges[energy_bin_id]
         emax = self.energy_edges[energy_bin_id + 1]
