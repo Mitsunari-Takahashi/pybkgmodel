@@ -1127,7 +1127,7 @@ f"""{type(self).__name__} instance
         # parameters, in degrees (see fit_camera_response()).
         return result.x[2] * u.deg, result.x[3] * u.deg
 
-    def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg, pixels=None, ax_unit='deg'):
+    def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg, pixels=None, energy_bin_id=None, ax_unit='deg'):
         """
         Illustrate the smoothing neighbourhood of smoothed_posterior_rate()
         (see polar_neighbourhood()) for example pixels: the pixels
@@ -1144,6 +1144,13 @@ f"""{type(self).__name__} instance
         scale as the Gaussian sigma, to which the King function reduces
         for gamma_tail -> infinity.
 
+        If energy_bin_id is given, the observed counts of that energy
+        bin are shown underneath (masked pixels blank), the averaged
+        pixels are outlined instead of filled so the counts stay
+        visible, and the Gaussian core circle is drawn at the energy
+        bin's center, with sigma_core(e) = sigma_core0 *
+        (e/e0)**delta_sigma_core (see camera_response()).
+
         Parameters
         ----------
         result: scipy.optimize.OptimizeResult
@@ -1155,6 +1162,10 @@ f"""{type(self).__name__} instance
             pixels: the one closest to the core peak, and one far from
             it (at 70% of the smaller half-extent of the camera, toward
             the upper right).
+        energy_bin_id: int, optional
+            Energy bin whose counts are shown underneath. If None
+            (default), no counts are shown and the Gaussian core is
+            drawn at e = e0.
         ax_unit: str
             Unit to use for the x/y axes.
 
@@ -1162,6 +1173,8 @@ f"""{type(self).__name__} instance
         -------
         fig, ax: matplotlib figure and axes
         """
+        from matplotlib import patheffects
+        from matplotlib.collections import LineCollection
         from matplotlib.colors import ListedColormap
         from matplotlib.patches import Circle, Ellipse, Rectangle, Wedge
 
@@ -1178,33 +1191,60 @@ f"""{type(self).__name__} instance
                 np.unravel_index(np.argmin(np.hypot(xx - far[0], yy - far[1])), xx.shape),
             ]
 
-        # Categorical slots 1 and 2 (blue, orange) of the reference palette.
+        # Categorical slots of the reference palette: 1 and 2 (blue,
+        # orange) for the example pixels; on top of a counts map, 3
+        # and 5 (aqua, magenta) for the fitted components, otherwise
+        # black.
         colors = ['#2a78d6', '#eb6834']
+        on_counts = energy_bin_id is not None
+        core_color, tail_color = ('#1baf7a', '#e87ba4') if on_counts else ('black', 'black')
 
         to_unit = lambda q: q.to_value(ax_unit)
-        fig, ax = pyplot.subplots(figsize=(7, 7 * np.ptp(self.yedges) / np.ptp(self.xedges) + 0.5))
+        xedges = to_unit(self.xedges)
+        yedges = to_unit(self.yedges)
+        fig, ax = pyplot.subplots(figsize=(7.5 if on_counts else 7, 7 * np.ptp(self.yedges) / np.ptp(self.xedges) + 0.5))
 
-        # Faint pixel grid.
-        ax.pcolormesh(
-            to_unit(self.xedges), to_unit(self.yedges), np.zeros((len(y), len(x))),
-            cmap=ListedColormap(['white']), edgecolors='#e0e0e0', linewidth=0.5
-        )
+        if on_counts:
+            counts = np.where(self.mask, self.counts[energy_bin_id], np.nan)
+            im = ax.pcolormesh(xedges, yedges, counts.T, cmap='Greys', vmin=0)
+            fig.colorbar(im, ax=ax, label='Counts', fraction=0.046, pad=0.04)
+        else:
+            # Faint pixel grid.
+            ax.pcolormesh(
+                xedges, yedges, np.zeros((len(y), len(x))),
+                cmap=ListedColormap(['white']), edgecolors='#e0e0e0', linewidth=0.5
+            )
 
-        for n, (index, color) in enumerate(zip(pixels, colors * len(pixels))):
+        for index, color in zip(pixels, colors * len(pixels)):
             index = tuple(int(v) for v in index)
             neighbours = polar_neighbourhood(x, y, x0, y0, index, max_dphi, max_dr, max_dist)
 
-            ax.pcolormesh(
-                to_unit(self.xedges), to_unit(self.yedges),
-                np.ma.masked_where(~neighbours.T, np.ones(neighbours.T.shape)),
-                cmap=ListedColormap([color]), alpha=0.45
-            )
+            if on_counts:
+                # Outline of the averaged pixels: pixel sides not shared
+                # with another averaged pixel.
+                padded = np.pad(neighbours, 1)
+                segments = []
+                for i, j in zip(*np.nonzero(neighbours)):
+                    if not padded[i, j+1]:
+                        segments.append([(xedges[i], yedges[j]), (xedges[i], yedges[j+1])])
+                    if not padded[i+2, j+1]:
+                        segments.append([(xedges[i+1], yedges[j]), (xedges[i+1], yedges[j+1])])
+                    if not padded[i+1, j]:
+                        segments.append([(xedges[i], yedges[j]), (xedges[i+1], yedges[j])])
+                    if not padded[i+1, j+2]:
+                        segments.append([(xedges[i], yedges[j+1]), (xedges[i+1], yedges[j+1])])
+                ax.add_collection(LineCollection(segments, colors=color, linewidths=2))
+            else:
+                ax.pcolormesh(
+                    xedges, yedges,
+                    np.ma.masked_where(~neighbours.T, np.ones(neighbours.T.shape)),
+                    cmap=ListedColormap([color]), alpha=0.45
+                )
 
             i, j = index
             ax.add_patch(Rectangle(
-                (to_unit(self.xedges[i]), to_unit(self.yedges[j])),
-                to_unit(self.xedges[i+1] - self.xedges[i]), to_unit(self.yedges[j+1] - self.yedges[j]),
-                fill=False, edgecolor=color, linewidth=2
+                (xedges[i], yedges[j]), xedges[i+1] - xedges[i], yedges[j+1] - yedges[j],
+                fill=False, edgecolor=color, linewidth=2, hatch='////' if on_counts else None
             ))
 
             # Limits: annular sector (polar condition) and circle (distance condition).
@@ -1236,37 +1276,50 @@ f"""{type(self).__name__} instance
             ax.plot([], [], 's', color=color, alpha=0.6,
                     label=f'Pixel ({i}, {j}), r = {r:.2f} deg: {neighbours.sum()} pixels averaged')
 
-        ax.plot(to_unit(x0), to_unit(y0), '+', color='black', markersize=12, markeredgewidth=2, label='Gaussian core peak')
+        ax.plot(
+            to_unit(x0), to_unit(y0), '+', color='black', markersize=12, markeredgewidth=2,
+            path_effects=[patheffects.withStroke(linewidth=4, foreground='white')], label='Gaussian core peak'
+        )
 
         # Fitted spatial components (see camera_response() for the
         # parameter order).
-        sigma_core0 = result.x[0] * u.deg
+        sigma_core0, delta_sigma_core = result.x[0], result.x[1]
         sigma_tail, gamma_tail, ecc_tail, phi_tail = result.x[4:8]
         e0 = result.x[11] * u.TeV
+        if on_counts:
+            e = np.sqrt(self.energy_edges[energy_bin_id] * self.energy_edges[energy_bin_id + 1]).to(u.TeV)
+        else:
+            e = e0
+        sigma_core = sigma_core0 * ((e / e0).decompose().value)**delta_sigma_core * u.deg
         ax.add_patch(Circle(
-            (to_unit(x0), to_unit(y0)), to_unit(sigma_core0),
-            fill=False, edgecolor='black', linewidth=1.5
+            (to_unit(x0), to_unit(y0)), to_unit(sigma_core),
+            fill=False, edgecolor=core_color, linewidth=1.8
         ))
-        ax.plot([], [], '-', color='black',
-                label=f'Gaussian core 1 sigma at e0 = {e0:.2f} (sigma = {sigma_core0:.2f})')
+        ax.plot([], [], '-', color=core_color,
+                label=f'Gaussian core 1 sigma at {e:.2f} (sigma = {sigma_core:.2f})')
 
         semi_major = sigma_tail / np.sqrt(1 - ecc_tail) * u.deg
         semi_minor = sigma_tail * np.sqrt(1 - ecc_tail) * u.deg
         ax.add_patch(Ellipse(
             (0, 0), 2*to_unit(semi_major), 2*to_unit(semi_minor), angle=np.degrees(phi_tail),
-            fill=False, edgecolor='black', linestyle='-.', linewidth=1.5
+            fill=False, edgecolor=tail_color, linestyle='-.', linewidth=1.8
         ))
-        ax.plot([], [], '-.', color='black',
+        ax.plot([], [], '-.', color=tail_color,
                 label=f'King tail sigma ellipse ({semi_major:.2f} x {semi_minor:.2f}, gamma = {gamma_tail:.2f})')
         ax.plot([], [], '--', color='gray', label=f'|dphi| <= {max_dphi.to_value(u.deg):g} deg, |dr| <= {max_dr.to_value(u.deg):g} deg')
         ax.plot([], [], ':', color='gray', label=f'distance <= {max_dist.to_value(u.deg):g} deg')
 
-        ax.set_xlim(to_unit(self.xedges[0]), to_unit(self.xedges[-1]))
-        ax.set_ylim(to_unit(self.yedges[0]), to_unit(self.yedges[-1]))
+        ax.set_xlim(xedges[0], xedges[-1])
+        ax.set_ylim(yedges[0], yedges[-1])
         ax.set_aspect('equal')
         ax.set_xlabel(f'X [{ax_unit}]')
         ax.set_ylabel(f'Y [{ax_unit}]')
-        ax.set_title('Smoothing neighbourhoods')
+        if on_counts:
+            emin = self.energy_edges[energy_bin_id]
+            emax = self.energy_edges[energy_bin_id + 1]
+            ax.set_title(f'Counts and smoothing neighbourhoods\nEnergy bin {energy_bin_id}: [{emin:.2f}, {emax:.2f}]')
+        else:
+            ax.set_title('Smoothing neighbourhoods')
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=1, frameon=False, fontsize='small')
         fig.tight_layout()
 

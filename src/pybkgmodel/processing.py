@@ -478,8 +478,9 @@ class BkgMakerBase:
             Background map to plot.
         base_path : str
             Output path without extension. '_map_bin<i>.png',
-            '_fit_check_bin<i>.png', '_fit_spectrum.png' and
-            '_smoothing_neighbourhood.png' are appended to it.
+            '_fit_check_bin<i>.png', '_counts_smoothing_bin<i>.png',
+            '_fit_spectrum.png' and '_smoothing_neighbourhood.png' are
+            appended to it.
         result : scipy.optimize.OptimizeResult, optional
             Result of bkg_map.fit_camera_response(), must have a
             model_counts attribute, used as the posterior_counts()
@@ -498,6 +499,13 @@ class BkgMakerBase:
             pyplot.close(pyplot.gcf())
 
             if result is not None:
+                fig, _ = bkg_map.plot_smoothing_neighbourhood(
+                    result, max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST,
+                    energy_bin_id=i
+                )
+                fig.savefig(f"{base_path}_counts_smoothing_bin{i}.png", bbox_inches='tight')
+                pyplot.close(fig)
+
                 fig, _ = bkg_map.plot_fit_check(
                     result, energy_bin_id=i, prior_strength=prior_strength,
                     smoothing=dict(
