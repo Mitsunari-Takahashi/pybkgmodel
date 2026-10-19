@@ -133,12 +133,14 @@ POSTERIOR_PRIOR_STRENGTH = 25.0
 # background model written out by write_maps(): pixels whose centers,
 # seen from the fitted Gaussian core peak, are within
 # SMOOTHING_MAX_DPHI in azimuth and SMOOTHING_MAX_DR in radial
-# distance (or within SMOOTHING_MAX_DIST of each other, see below) are
+# distance (counted as negative across the peak, see
+# pybkgmodel.camera.polar_neighbourhood()), or within
+# SMOOTHING_MAX_DIST of each other (see below), are
 # averaged together, then corrected with the fitted model
 # shape and renormalized to the posterior total per energy bin (see
 # CameraImage.smoothed_posterior_rate()).
 SMOOTHING_MAX_DPHI = 10 * u.deg
-SMOOTHING_MAX_DR = 0.5 * u.deg
+SMOOTHING_MAX_DR = 0.25 * u.deg
 # Pixels whose centers are within this distance of each other are
 # always averaged together, whatever their azimuth and radial distance.
 # This keeps the neighbourhood from shrinking to a thin sliver near the

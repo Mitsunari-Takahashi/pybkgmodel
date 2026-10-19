@@ -287,6 +287,12 @@ def polar_neighbourhood(x, y, x0, y0, index, max_dphi, max_dr, max_dist=0*u.deg)
     neighbourhood of the pixel at index if either
     1. its center, seen from (x0, y0), lies within max_dphi in azimuth
        and within max_dr in radial distance of that pixel's center, or
+       on the opposite side of (x0, y0) along the same line (azimuth
+       within max_dphi of the opposite direction), where its radial
+       distance counts as negative: a pixel at radial distance r_j
+       across (x0, y0) from a pixel at r_i is r_i + r_j away radially.
+       The neighbourhood is thus a strip along the line through
+       (x0, y0), continuous across it, or
     2. its center lies within max_dist of that pixel's center,
        whatever its azimuth and radial distance (this keeps the
        neighbourhood from shrinking to a thin sliver near (x0, y0),
@@ -346,7 +352,10 @@ def _polar_neighbours(geometry, k, limits):
     dphi_lim, dr_lim, dist_lim = limits
 
     dphi = (phi - phi[k] + np.pi) % (2*np.pi) - np.pi
-    polar = (np.abs(dphi) <= dphi_lim) & (np.abs(r - r[k]) <= dr_lim)
+    same_side = (np.abs(dphi) <= dphi_lim) & (np.abs(r - r[k]) <= dr_lim)
+    # Across (x0, y0), the radial distance counts as negative (-r).
+    opposite_side = (np.abs(dphi) >= np.pi - dphi_lim) & (r + r[k] <= dr_lim)
+    polar = same_side | opposite_side
     close = np.hypot(xx - xx[k], yy - yy[k]) <= dist_lim
 
     return polar | close
@@ -999,7 +1008,7 @@ f"""{type(self).__name__} instance
         e0 = (emin * emax)**0.5
         return (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
 
-    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.5*u.deg, max_dist=0.15*u.deg):
+    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg):
         """
         Bayesian posterior rate (see posterior_rate()), smoothed by a
         moving average over polar neighbourhoods around the fitted
@@ -1034,7 +1043,8 @@ f"""{type(self).__name__} instance
             the pixels averaged together. Defaults to 10 deg.
         max_dr: astropy.units.Quantity
             Maximal difference in radial distance from the core peak
-            of the pixels averaged together. Defaults to 0.5 deg.
+            of the pixels averaged together, counted as negative across
+            the peak (see polar_neighbourhood()). Defaults to 0.25 deg.
         max_dist: astropy.units.Quantity
             Distance between pixel centers within which pixels are
             always averaged together, whatever max_dphi and max_dr
@@ -1081,7 +1091,7 @@ f"""{type(self).__name__} instance
 
         return smoothed * scale[:, None, None]
 
-    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.5*u.deg, max_dist=0.15*u.deg, index=-2):
+    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg, index=-2):
         """
         Same as posterior_differential_rate(), but based on the
         smoothed posterior rate of smoothed_posterior_rate().
@@ -1117,7 +1127,7 @@ f"""{type(self).__name__} instance
         # parameters, in degrees (see fit_camera_response()).
         return result.x[2] * u.deg, result.x[3] * u.deg
 
-    def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.5*u.deg, max_dist=0.15*u.deg, pixels=None, ax_unit='deg'):
+    def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg, pixels=None, ax_unit='deg'):
         """
         Illustrate the smoothing neighbourhood of smoothed_posterior_rate()
         (see polar_neighbourhood()) for example pixels: the pixels
@@ -1210,6 +1220,14 @@ f"""{type(self).__name__} instance
                 width=((r_out - r_in) * u.deg).to_value(ax_unit),
                 fill=False, edgecolor=color, linestyle='--', linewidth=1.2
             ))
+            # Part of the strip across the peak (negative radial distance).
+            r_across = max_dr.to_value(u.deg) - r
+            if r_across > 0:
+                ax.add_patch(Wedge(
+                    (to_unit(x0), to_unit(y0)), (r_across * u.deg).to_value(ax_unit),
+                    phi + 180 - dphi, phi + 180 + dphi,
+                    fill=False, edgecolor=color, linestyle='--', linewidth=1.2
+                ))
             ax.add_patch(Circle(
                 (to_unit(x[i]), to_unit(y[j])), to_unit(max_dist),
                 fill=False, edgecolor=color, linestyle=':', linewidth=1.5
