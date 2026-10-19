@@ -20,7 +20,7 @@ from pybkgmodel.message import message
 from pybkgmodel.model import (WobbleMap,
                               ExclusionMap
                             )
-from pybkgmodel.camera import RectangularCameraImage, rebin_factor
+from pybkgmodel.camera import RectangularCameraImage
 
 # Order of the camera_response() fit parameters, as expected by
 # CameraImage.fit_camera_response() / fitted_differential_rate().
@@ -129,13 +129,21 @@ CAMERA_RESPONSE_PARAM_NAMES = (
 # out by write_maps(); see CameraImage.posterior_counts().
 POSTERIOR_PRIOR_STRENGTH = 25.0
 
-# Approximate spatial bin width of the background model written out by
-# write_maps(). Each bin of the configured (coarser) x/y binning is
-# split into the integer number of equal sub-bins whose width is
-# closest to this value (see pybkgmodel.camera.rebin_factor()), and its
-# posterior count is shared among them following the fitted
-# camera_response() shape (see CameraImage.rebinned_posterior()).
-REBIN_TARGET_WIDTH = 0.1 * u.deg
+# Spatial (x/y) bin width of the background maps. The configured
+# min/max range of each axis is split into the integer number of equal
+# bins whose width is closest to this value; the configured nbins is
+# not used.
+SPATIAL_BIN_WIDTH = 0.1 * u.deg
+
+# Neighbourhood of the moving average applied to the posterior
+# background model written out by write_maps(): pixels whose centers,
+# seen from the fitted Gaussian core peak, are within
+# SMOOTHING_MAX_DPHI in azimuth and SMOOTHING_MAX_DR in radial
+# distance are averaged together, then corrected with the fitted model
+# shape and renormalized to the posterior total per energy bin (see
+# CameraImage.smoothed_posterior_rate()).
+SMOOTHING_MAX_DPHI = 10 * u.deg
+SMOOTHING_MAX_DR = 0.5 * u.deg
 
 # list of class attributes, which have a unit assigned
 quantity_list = [
@@ -243,12 +251,16 @@ class BkgMakerBase:
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity
@@ -276,17 +288,9 @@ class BkgMakerBase:
         self.out_prefix     = out_prefix
         self.overwrite      = overwrite
 
-        self.x_edges        = np.linspace(
-                                x_min,
-                                x_max,
-                                x_nbins+1
-                                )
+        self.x_edges        = self.spatial_edges(x_min, x_max, x_nbins, 'x')
 
-        self.y_edges        = np.linspace(
-                                y_min,
-                                y_max,
-                                y_nbins+1
-                                )
+        self.y_edges        = self.spatial_edges(y_min, y_max, y_nbins, 'y')
 
         self.e_edges        = np.geomspace(
                                 e_min,
@@ -298,6 +302,37 @@ class BkgMakerBase:
 
         self._bkg_map_maker = None
 
+
+    @staticmethod
+    def spatial_edges(x_min, x_max, nbins, name):
+        """
+        Uniform bin edges between x_min and x_max, with the integer
+        number of bins whose width is closest to SPATIAL_BIN_WIDTH.
+
+        Parameters
+        ----------
+        x_min, x_max : astropy.units.quantity.Quantity
+            Range of the axis.
+        nbins : int
+            Number of bins given in the configuration file. Not used,
+            only reported if it differs from the one used.
+        name : str
+            Axis name, used in the report.
+
+        Returns
+        -------
+        edges : astropy.units.quantity.Quantity
+            Bin edges.
+        """
+        n = max(1, int(round(((x_max - x_min) / SPATIAL_BIN_WIDTH).decompose().value)))
+
+        if n != nbins:
+            message(
+                f"Using {n} bins of {((x_max - x_min) / n).to(u.deg):.3f} along {name} "
+                f"instead of the configured nbins = {nbins}."
+            )
+
+        return np.linspace(x_min, x_max, n + 1)
 
     @property
     def bkg_map_maker(self):
@@ -452,7 +487,7 @@ class BkgMakerBase:
         return stacked_map
 
     @staticmethod
-    def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=POSTERIOR_PRIOR_STRENGTH, factor=None):
+    def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=POSTERIOR_PRIOR_STRENGTH):
         """
         Save diagnostic plot images for a single background map: the
         observed rate map (CameraImage.plot()) for every energy bin,
@@ -479,11 +514,6 @@ class BkgMakerBase:
             Prior weight passed to plot_fit_check() /
             plot_fit_spectrum() (see CameraImage.posterior_counts()).
             Defaults to POSTERIOR_PRIOR_STRENGTH.
-        factor : tuple of int, optional
-            Rebinning factor (kx, ky) of the background model written
-            out, passed to plot_fit_check() to also show the rebinned
-            posterior (see CameraImage.rebinned_posterior()). If None
-            (default), no rebinned map is shown.
         """
         n_ebins = len(bkg_map.energy_edges) - 1
 
@@ -493,47 +523,16 @@ class BkgMakerBase:
             pyplot.close(pyplot.gcf())
 
             if result is not None:
-                fig, _ = bkg_map.plot_fit_check(result, energy_bin_id=i, factor=factor, prior_strength=prior_strength)
+                fig, _ = bkg_map.plot_fit_check(
+                    result, energy_bin_id=i, prior_strength=prior_strength,
+                    smoothing=dict(max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR)
+                )
                 fig.savefig(f"{base_path}_fit_check_bin{i}.png")
                 pyplot.close(fig)
 
         if result is not None:
             fig, _ = bkg_map.plot_fit_spectrum(result, prior_strength=prior_strength)
             fig.savefig(f"{base_path}_fit_spectrum.png")
-            pyplot.close(fig)
-
-    @staticmethod
-    def save_rebinned_plots(fine_map, dnde, base_path, ax_unit='deg'):
-        """
-        Save images of the rebinned background model (see
-        CameraImage.rebinned_posterior()), one per energy bin, as a
-        visual check of the smoothing.
-
-        Parameters
-        ----------
-        fine_map : pybkgmodel.camera.CameraImage
-            Background map on the fine grid.
-        dnde : astropy.units.Quantity
-            Differential background rate on the fine grid, see
-            CameraImage.rebinned_posterior_differential_rate().
-        base_path : str
-            Output path without extension. '_map_rebinned_bin<i>.png'
-            is appended to it.
-        ax_unit : str
-            Unit to use for the x/y axes.
-        """
-        val_unit = '1 / (s * MeV * sr)'
-        for i in range(len(fine_map.energy_edges) - 1):
-            fig, ax = pyplot.subplots()
-            im = ax.pcolormesh(
-                fine_map.xedges.to_value(ax_unit),
-                fine_map.yedges.to_value(ax_unit),
-                dnde[i].to_value(val_unit).transpose()
-            )
-            ax.set_xlabel(f'X [{ax_unit}]')
-            ax.set_ylabel(f'Y [{ax_unit}]')
-            fig.colorbar(im, ax=ax, label=f'BKG [{val_unit}]')
-            fig.savefig(f"{base_path}_map_rebinned_bin{i}.png")
             pyplot.close(fig)
 
     @staticmethod
@@ -553,12 +552,12 @@ class BkgMakerBase:
         converge, the map falls back to the raw counts-based rate
         (CameraImage.differential_rate()) and a warning is printed.
 
-        If the fit succeeded, the posterior is additionally rebinned
-        onto a finer spatial grid before writing: each configured x/y
-        bin is split into the integer number of sub-bins closest to
-        REBIN_TARGET_WIDTH, sharing the bin's posterior count among
-        them in proportion to the fitted camera_response() at the
-        sub-bin centers (see CameraImage.rebinned_posterior()).
+        If the fit succeeded, the posterior is additionally smoothed
+        before writing, by a moving average over the pixels within
+        SMOOTHING_MAX_DPHI in azimuth and SMOOTHING_MAX_DR in radial
+        distance, seen from the fitted Gaussian core peak, corrected
+        with the fitted model shape and renormalized to the posterior
+        total per energy bin (see CameraImage.smoothed_posterior_rate()).
 
         Diagnostic plot images (the rate map, and, if the fit
         succeeded, the posterior fit-quality checks) are saved
@@ -606,39 +605,16 @@ class BkgMakerBase:
                 for name, val in zip(CAMERA_RESPONSE_PARAM_NAMES, fit_result.x):
                     print(f"    {name:12s} = {val: .6g}")
 
-            factor = None
+            base_path, _ = os.path.splitext(key)
+            BkgMakerBase.save_diagnostic_plots(bkg_map, base_path, result=fit_result)
+
             if fit_result is not None:
-                factor = (
-                    rebin_factor(bkg_map.xedges, REBIN_TARGET_WIDTH),
-                    rebin_factor(bkg_map.yedges, REBIN_TARGET_WIDTH),
+                dnde = bkg_map.smoothed_posterior_differential_rate(
+                    fit_result, prior_strength=POSTERIOR_PRIOR_STRENGTH,
+                    max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR
                 )
 
-            base_path, _ = os.path.splitext(key)
-            BkgMakerBase.save_diagnostic_plots(
-                bkg_map, base_path, result=fit_result,
-                factor=None if factor == (1, 1) else factor
-            )
-
-            out_map = bkg_map
-            if fit_result is not None:
-                if factor == (1, 1):
-                    dnde = bkg_map.posterior_differential_rate(
-                        fit_result, prior_strength=POSTERIOR_PRIOR_STRENGTH
-                    )
-                else:
-                    out_map, dnde = bkg_map.rebinned_posterior_differential_rate(
-                        fit_result, factor, prior_strength=POSTERIOR_PRIOR_STRENGTH
-                    )
-                    message(
-                        "Rebinning the background model: "
-                        f"x {np.diff(bkg_map.xedges)[0].to_value(u.deg):.3f} deg -> "
-                        f"{np.diff(out_map.xedges)[0].to_value(u.deg):.3f} deg (x{factor[0]}), "
-                        f"y {np.diff(bkg_map.yedges)[0].to_value(u.deg):.3f} deg -> "
-                        f"{np.diff(out_map.yedges)[0].to_value(u.deg):.3f} deg (x{factor[1]})"
-                    )
-                    BkgMakerBase.save_rebinned_plots(out_map, dnde, base_path)
-
-            out_map.to_hdu(bkg_rate=dnde).writeto(key, overwrite=overwrite)
+            bkg_map.to_hdu(bkg_rate=dnde).writeto(key, overwrite=overwrite)
 
 class Runwise(BkgMakerBase):
     """
@@ -767,12 +743,16 @@ class RunwiseWobbleMap(Runwise):
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity
@@ -898,12 +878,16 @@ class StackedWobbleMap(Stacked):
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity
@@ -1032,12 +1016,16 @@ class RunwiseExclusionMap(Runwise):
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity
@@ -1172,12 +1160,16 @@ class StackedExclusionMap(Stacked):
             Maximum positon along the x/azimuth axis.
         x_nbins : int
             Number of bins along the x/azimuth axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         y_min : astropy.units.quantity.Quantity
             Minimal positon along the y/Zenith axis.
         y_max : astropy.units.quantity.Quantity
             Maximum positon along the y/Zenith axis.
         y_nbins : int
             Number of bins along the y/Zenith axis.
+            Not used: the number of bins follows from
+            SPATIAL_BIN_WIDTH instead.
         e_min : astropy.units.quantity.Quantity
             Minimal energy edge of the bkg maps.
         e_max : astropy.units.quantity.Quantity

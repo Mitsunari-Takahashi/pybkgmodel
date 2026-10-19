@@ -279,54 +279,59 @@ def camera_response(x, y, e,
     )
 
 
-def rebin_factor(edges, target_width):
+def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr):
     """
-    Number of equal sub-bins each bin of the given (uniform) binning
-    has to be split into, so that the sub-bin width is as close as
-    possible to target_width. At least 1 (no splitting).
+    Moving average of a camera map over polar neighbourhoods around
+    the point (x0, y0). For each pixel, the new value is the plain mean
+    over all pixels whose center, seen from (x0, y0), lies within
+    max_dphi in azimuth and within max_dr in radial distance of that
+    pixel's center (the pixel itself always included).
 
     Parameters
     ----------
-    edges: astropy.units.Quantity
-        Uniform bin edges.
-    target_width: astropy.units.Quantity
-        Desired sub-bin width.
+    values: array_like or astropy.units.Quantity
+        Map(s) to average, of shape (..., nx, ny).
+    x, y: astropy.units.Quantity
+        Pixel center coordinates along x (nx values) and y (ny values).
+    x0, y0: astropy.units.Quantity
+        Center of the polar coordinate system.
+    max_dphi: astropy.units.Quantity
+        Maximal azimuth difference (angle between the lines joining
+        (x0, y0) to the two pixel centers).
+    max_dr: astropy.units.Quantity
+        Maximal radial distance difference from (x0, y0).
 
     Returns
     -------
-    factor: int
-        Number of sub-bins per bin.
+    averaged: array_like or astropy.units.Quantity
+        Averaged map(s), of the same shape and unit as values.
     """
-    widths = np.diff(edges)
-    if not np.allclose(widths, widths[0]):
-        raise ValueError("Rebinning requires uniform bin edges.")
+    unit = getattr(values, 'unit', None)
+    values = np.asarray(getattr(values, 'value', values), dtype=float)
 
-    ratio = (widths[0] / target_width).decompose().value
+    xx, yy = np.meshgrid((x - x0).to_value(u.deg), (y - y0).to_value(u.deg), indexing='ij')
+    r = np.hypot(xx, yy).ravel()
+    phi = np.arctan2(yy, xx).ravel()
 
-    return max(1, int(round(ratio)))
+    # Small tolerance, so that pixels exactly on the neighbourhood
+    # boundary (common on a regular grid) are not lost to round-off.
+    tol = 1e-9
+    dphi_lim = max_dphi.to_value(u.rad) + tol
+    dr_lim = max_dr.to_value(u.deg) + tol
 
+    flat = values.reshape(values.shape[:-2] + (-1,))
+    averaged = np.empty_like(flat)
 
-def subdivide_edges(edges, factor):
-    """
-    Split every bin of the given binning linearly into factor equal
-    sub-bins.
+    for i in range(r.size):
+        dphi = (phi - phi[i] + np.pi) % (2*np.pi) - np.pi
+        neighbours = (np.abs(dphi) <= dphi_lim) & (np.abs(r - r[i]) <= dr_lim)
+        averaged[..., i] = flat[..., neighbours].mean(axis=-1)
 
-    Parameters
-    ----------
-    edges: astropy.units.Quantity
-        Bin edges.
-    factor: int
-        Number of sub-bins per bin.
+    averaged = averaged.reshape(values.shape)
+    if unit is not None:
+        averaged = averaged * unit
 
-    Returns
-    -------
-    fine_edges: astropy.units.Quantity
-        Sub-bin edges, (len(edges) - 1) * factor + 1 of them.
-    """
-    frac = np.arange(factor) / factor
-    fine = edges[:-1, None] + np.diff(edges)[:, None] * frac[None, :]
-
-    return np.concatenate((fine.ravel(), edges[-1:]))
+    return averaged
 
 
 def solid_angle_lat_lon_rectangle(theta_E, theta_W, phi_N, phi_S):
@@ -903,108 +908,118 @@ f"""{type(self).__name__} instance
         e0 = (emin * emax)**0.5
         return (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
 
-    def rebinned_posterior(self, result, factor, prior_strength=1.0):
+    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.5*u.deg):
         """
-        Bayesian posterior counts / rate (see posterior_counts(),
-        posterior_rate()), redistributed onto a finer spatial grid.
+        Bayesian posterior rate (see posterior_rate()), smoothed by a
+        moving average over polar neighbourhoods around the fitted
+        Gaussian core peak (x0_core, y0_core) of camera_response(),
+        see polar_moving_average().
 
-        Each pixel of this image is split into kx x ky equal sub-pixels
-        (see subdivide_edges()). Its posterior count is shared among
-        them in proportion to the fitted camera_response() evaluated at
-        each sub-pixel center, normalized within the parent pixel, so
-        that the sub-pixel values sum exactly to the parent's posterior
-        count. Every sub-pixel inherits its parent's exposure and mask.
-        The energy binning is left unchanged.
+        The plain average would flatten the steep radial profile of
+        the background (lowering the center, raising the outskirts).
+        To avoid this, the averaged posterior of each pixel i is
+        corrected with the fitted model rate f (result.model_rate):
+
+            smoothed_i = <posterior>_i * f_i / <f>_i
+
+        where <.>_i is the average over the neighbourhood of pixel i.
+        A posterior following the fitted shape is thus left unchanged,
+        and only deviations from that shape are smoothed. Finally, the
+        smoothed rate is rescaled, per energy bin, so that its sum over
+        all pixels equals that of the posterior rate.
+
+        All averages are taken over the rate per unit solid angle, so
+        that pixels of slightly different solid angle are weighted
+        consistently.
 
         Parameters
         ----------
         result: scipy.optimize.OptimizeResult
             Result of fit_camera_response(), see posterior_counts().
-        factor: tuple of int
-            Number of sub-pixels (kx, ky) per pixel along x and y,
-            see rebin_factor().
         prior_strength: float
             Prior weight, see posterior_counts().
+        max_dphi: astropy.units.Quantity
+            Maximal azimuth difference, seen from the core peak, of
+            the pixels averaged together. Defaults to 10 deg.
+        max_dr: astropy.units.Quantity
+            Maximal difference in radial distance from the core peak
+            of the pixels averaged together. Defaults to 0.5 deg.
 
         Returns
         -------
-        fine_image: CameraImage
-            Image of the same type on the fine grid, holding the
-            redistributed posterior counts.
         rate: array_like astropy.unit.Quantity
-            Redistributed posterior rate, of the same shape as
-            fine_image.counts.
+            Smoothed posterior rate, of the same shape as
+            CameraImage.counts.
         """
-        kx, ky = factor
-        n_e = len(self.energy_edges) - 1
-        nx = len(self.xedges) - 1
-        ny = len(self.yedges) - 1
+        # x0_core, y0_core are the 3rd and 4th camera_response()
+        # parameters, in degrees (see fit_camera_response()).
+        x0 = result.x[2] * u.deg
+        y0 = result.x[3] * u.deg
 
-        xedges = subdivide_edges(self.xedges, kx)
-        yedges = subdivide_edges(self.yedges, ky)
+        x = (self.xedges[1:] + self.xedges[:-1]) / 2
+        y = (self.yedges[1:] + self.yedges[:-1]) / 2
 
-        x = ((xedges[1:] + xedges[:-1]) / 2).to_value(u.deg)
-        y = ((yedges[1:] + yedges[:-1]) / 2).to_value(u.deg)
-        e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(u.TeV)
-        ee, xx, yy = np.meshgrid(e, x, y, indexing='ij')
+        posterior = self.posterior_rate(result, prior_strength=prior_strength)
+        posterior_density = posterior / self.pixel_area
+        model_density = result.model_rate / self.pixel_area
 
-        # Sharing weights of the sub-pixels within each parent pixel,
-        # from the fitted model shape at the sub-pixel centers.
-        shape = camera_response(xx, yy, ee, *result.x).reshape((n_e, nx, kx, ny, ky))
-        total = shape.sum(axis=(2, 4), keepdims=True)
-        valid = np.isfinite(total) & (total > 0)
+        averaged = polar_moving_average(posterior_density, x, y, x0, y0, max_dphi, max_dr)
+        model_averaged = polar_moving_average(model_density, x, y, x0, y0, max_dphi, max_dr)
+
+        # Shape correction f_i / <f>_i; left out (i.e. 1) where the
+        # neighbourhood model average vanishes.
+        valid = model_averaged.value > 0
         with np.errstate(invalid='ignore', divide='ignore'):
-            weights = np.where(valid, shape / np.where(valid, total, 1), 1 / (kx * ky))
+            correction = np.where(
+                valid,
+                (model_density / np.where(valid, model_averaged, 1 * model_averaged.unit)).decompose().value,
+                1.0
+            )
 
-        def split(values):
-            fine = values[:, :, None, :, None] * weights
-            return fine.reshape((n_e, nx * kx, ny * ky))
+        smoothed = averaged * correction * self.pixel_area
 
-        counts = split(self.posterior_counts(result, prior_strength=prior_strength))
-        rate = split(self.posterior_rate(result, prior_strength=prior_strength))
-
-        mask = np.repeat(np.repeat(self.mask, kx, axis=0), ky, axis=1)
-        exposure = np.repeat(np.repeat(self.raw_exposure, kx, axis=0), ky, axis=1)
-
-        fine_image = type(self)(
-            counts, xedges, yedges, self.energy_edges,
-            center=self.center, mask=mask, exposure=exposure
+        # Per-energy-bin renormalization to the posterior total.
+        posterior_sum = posterior.sum(axis=(1, 2))
+        smoothed_sum = smoothed.sum(axis=(1, 2))
+        valid = smoothed_sum.value > 0
+        scale = np.where(
+            valid,
+            (posterior_sum / np.where(valid, smoothed_sum, 1 * smoothed_sum.unit)).decompose().value,
+            1.0
         )
 
-        return fine_image, rate
+        return smoothed * scale[:, None, None]
 
-    def rebinned_posterior_differential_rate(self, result, factor, prior_strength=1.0, index=-2):
+    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.5*u.deg, index=-2):
         """
-        Same as posterior_differential_rate(), but on the finer spatial
-        grid of rebinned_posterior().
+        Same as posterior_differential_rate(), but based on the
+        smoothed posterior rate of smoothed_posterior_rate().
 
         Parameters
         ----------
         result: scipy.optimize.OptimizeResult
             Result of fit_camera_response(), see posterior_counts().
-        factor: tuple of int
-            Number of sub-pixels (kx, ky) per pixel along x and y,
-            see rebinned_posterior().
         prior_strength: float
             Prior weight, see posterior_counts().
+        max_dphi, max_dr: astropy.units.Quantity
+            Smoothing neighbourhood, see smoothed_posterior_rate().
         index: float
             Power law spectral index, see differential_rate().
             Defaults to -2.
 
         Returns
         -------
-        fine_image: CameraImage
-            Image on the fine grid, see rebinned_posterior().
         dnde: array_like astropy.unit.Quantity
-            Posterior differential rate, of the same shape as
-            fine_image.counts.
+            Smoothed posterior differential rate, of the same shape as
+            the camera image.
         """
-        fine_image, rate = self.rebinned_posterior(result, factor, prior_strength=prior_strength)
-        dnde = rate / fine_image.pixel_area * self._int2diff(index)[:, None, None]
+        rate = self.smoothed_posterior_rate(
+            result, prior_strength=prior_strength, max_dphi=max_dphi, max_dr=max_dr
+        )
 
-        return fine_image, dnde
+        return rate / self.pixel_area * self._int2diff(index)[:, None, None]
 
-    def plot_fit_check(self, result, energy_bin_id=0, factor=None, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1 / (s deg2)'):
+    def plot_fit_check(self, result, energy_bin_id=0, smoothing=None, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1 / (s deg2)'):
         """
         Plot a spatial comparison between the observed rate and the
         Bayesian posterior rate (see posterior_rate()) -- the
@@ -1013,11 +1028,12 @@ f"""{type(self).__name__} instance
         energy bin, as a visual check of the fit quality.
 
         Produces a 2x2 grid of panels: the observed rate, the posterior
-        rate, the posterior rate rebinned onto the finer grid (see
-        rebinned_posterior()) and the residuals on the original grid,
-        expressed as the relative residual (data - posterior) /
-        posterior. The rates are shown per unit solid angle, so the
-        maps on the original and the fine grid share one color scale.
+        rate, the smoothed posterior rate (see
+        smoothed_posterior_rate()) and the residuals, expressed as the
+        relative residual (data - smoothed) / smoothed in counts (or
+        (data - posterior) / posterior if no smoothing is given). The
+        rates are shown per unit solid angle and share one color
+        scale.
         Masked pixels (see mask, mask_half(), mask_region()) are left
         blank in the data and residual panels (there is no trustworthy
         data to show or check there), but the posterior panels show the
@@ -1032,10 +1048,12 @@ f"""{type(self).__name__} instance
             attribute of the same shape as CameraImage.counts.
         energy_bin_id: int
             Energy bin to plot.
-        factor: tuple of int, optional
-            Number of sub-pixels (kx, ky) per pixel for the rebinned
-            panel, see rebinned_posterior(). If None (default), that
-            panel is left empty.
+        smoothing: dict, optional
+            Keyword arguments (max_dphi, max_dr) of
+            smoothed_posterior_rate() for the smoothed panel, which
+            is also used as the model of the residual panel. If None
+            (default), that panel is left empty and the residual is
+            computed against the unsmoothed posterior.
         ax_unit: str
             Unit to use for the x/y axes.
         cmap: str
@@ -1050,16 +1068,23 @@ f"""{type(self).__name__} instance
         Returns
         -------
         fig, axes: matplotlib figure and 2x2 array of axes
-            ((data, posterior), (rebinned posterior, residual)).
+            ((data, posterior), (smoothed posterior, residual)).
         """
         mask = self.mask
         data_counts = self.counts[energy_bin_id]
-        posterior_counts = self.posterior_counts(result, prior_strength=prior_strength)[energy_bin_id]
         pixel_area = self.pixel_area
+
+        if smoothing is not None:
+            smoothed_rate = self.smoothed_posterior_rate(result, prior_strength=prior_strength, **smoothing)[energy_bin_id]
+            model_counts = (smoothed_rate * self.raw_exposure).decompose().value
+            residual_title = 'Residual: (data - smoothed) / smoothed'
+        else:
+            model_counts = self.posterior_counts(result, prior_strength=prior_strength)[energy_bin_id]
+            residual_title = 'Residual: (data - posterior) / posterior'
 
         pull = np.full(data_counts.shape, np.nan)
         with np.errstate(invalid='ignore', divide='ignore'):
-            pull[mask] = (data_counts[mask] - posterior_counts[mask]) / posterior_counts[mask]
+            pull[mask] = (data_counts[mask] - model_counts[mask]) / model_counts[mask]
 
         with np.errstate(invalid='ignore', divide='ignore'):
             data = (data_counts / self.raw_exposure / pixel_area).to_value(val_unit)
@@ -1071,19 +1096,13 @@ f"""{type(self).__name__} instance
             (self.xedges, self.yedges, model, f'Posterior rate [{val_unit}]'),
         ]
 
-        if factor is not None:
-            fine_image, fine_rate = self.rebinned_posterior(result, factor, prior_strength=prior_strength)
-            fine_model = (fine_rate[energy_bin_id] / fine_image.pixel_area).to_value(val_unit)
-            fine_width = np.diff(fine_image.xedges)[0].to_value(ax_unit)
-            panels.append((
-                fine_image.xedges, fine_image.yedges, fine_model,
-                f'Rebinned posterior rate ({fine_width:.3g} {ax_unit}) [{val_unit}]'
-            ))
+        if smoothing is not None:
+            smoothed = (smoothed_rate / pixel_area).to_value(val_unit)
+            panels.append((self.xedges, self.yedges, smoothed, f'Smoothed posterior rate [{val_unit}]'))
         else:
-            fine_model = model
+            smoothed = model
 
-        vmax = max(np.nanmax(data), model.max(), fine_model.max())
-        pmax = np.nanmax(np.abs(pull)) if np.any(mask) else 1
+        vmax = max(np.nanmax(data), model.max(), smoothed.max())
 
         fig, axes = pyplot.subplots(2, 2, figsize=(12, 9))
         flat_axes = axes.ravel()
@@ -1096,14 +1115,14 @@ f"""{type(self).__name__} instance
             ax.set_title(title)
             fig.colorbar(im, ax=ax)
 
-        if factor is None:
+        if smoothing is None:
             flat_axes[2].set_visible(False)
 
         im = flat_axes[3].pcolormesh(
             self.xedges.to_value(ax_unit), self.yedges.to_value(ax_unit), pull.transpose(),
-            vmin=-pmax, vmax=pmax, cmap='coolwarm'
+            vmin=-2, vmax=2, cmap='coolwarm'
         )
-        flat_axes[3].set_title('Residual: (data - posterior) / posterior')
+        flat_axes[3].set_title(residual_title)
         fig.colorbar(im, ax=flat_axes[3])
 
         for ax in flat_axes:
