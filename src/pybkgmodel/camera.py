@@ -280,13 +280,83 @@ def camera_response(x, y, e,
     )
 
 
-def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr):
+def polar_neighbourhood(x, y, x0, y0, index, max_dphi, max_dr, max_dist=0*u.deg):
+    """
+    Pixels in the polar neighbourhood of one pixel, used for the
+    moving average of polar_moving_average(). A pixel belongs to the
+    neighbourhood of the pixel at index if either
+    1. its center, seen from (x0, y0), lies within max_dphi in azimuth
+       and within max_dr in radial distance of that pixel's center, or
+    2. its center lies within max_dist of that pixel's center,
+       whatever its azimuth and radial distance (this keeps the
+       neighbourhood from shrinking to a thin sliver near (x0, y0),
+       where a fixed azimuth range spans very little).
+    The pixel itself is always included.
+
+    Parameters
+    ----------
+    x, y: astropy.units.Quantity
+        Pixel center coordinates along x (nx values) and y (ny values).
+    x0, y0: astropy.units.Quantity
+        Center of the polar coordinate system.
+    index: tuple of int
+        (i, j) index of the pixel whose neighbourhood is returned.
+    max_dphi: astropy.units.Quantity
+        Maximal azimuth difference (angle between the lines joining
+        (x0, y0) to the two pixel centers).
+    max_dr: astropy.units.Quantity
+        Maximal radial distance difference from (x0, y0).
+    max_dist: astropy.units.Quantity
+        Distance between pixel centers within which pixels are always
+        included. Defaults to 0 (no such pixels).
+
+    Returns
+    -------
+    neighbours: numpy.ndarray of bool
+        Neighbourhood mask, of shape (nx, ny).
+    """
+    geometry = _polar_geometry(x, y, x0, y0)
+    limits = _polar_limits(max_dphi, max_dr, max_dist)
+    k = np.ravel_multi_index(index, (len(x), len(y)))
+
+    return _polar_neighbours(geometry, k, limits).reshape((len(x), len(y)))
+
+
+def _polar_geometry(x, y, x0, y0):
+    """Flattened pixel center coordinates (deg) and polar coordinates around (x0, y0)."""
+    xx, yy = np.meshgrid(x.to_value(u.deg), y.to_value(u.deg), indexing='ij')
+    dx = xx.ravel() - x0.to_value(u.deg)
+    dy = yy.ravel() - y0.to_value(u.deg)
+
+    return xx.ravel(), yy.ravel(), np.hypot(dx, dy), np.arctan2(dy, dx)
+
+
+def _polar_limits(max_dphi, max_dr, max_dist):
+    """Neighbourhood limits in rad / deg / deg."""
+    # Small tolerance, so that pixels exactly on the neighbourhood
+    # boundary (common on a regular grid) are not lost to round-off.
+    tol = 1e-9
+
+    return max_dphi.to_value(u.rad) + tol, max_dr.to_value(u.deg) + tol, max_dist.to_value(u.deg) + tol
+
+
+def _polar_neighbours(geometry, k, limits):
+    """Flattened neighbourhood mask of the k-th (flattened) pixel."""
+    xx, yy, r, phi = geometry
+    dphi_lim, dr_lim, dist_lim = limits
+
+    dphi = (phi - phi[k] + np.pi) % (2*np.pi) - np.pi
+    polar = (np.abs(dphi) <= dphi_lim) & (np.abs(r - r[k]) <= dr_lim)
+    close = np.hypot(xx - xx[k], yy - yy[k]) <= dist_lim
+
+    return polar | close
+
+
+def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr, max_dist=0*u.deg):
     """
     Moving average of a camera map over polar neighbourhoods around
-    the point (x0, y0). For each pixel, the new value is the plain mean
-    over all pixels whose center, seen from (x0, y0), lies within
-    max_dphi in azimuth and within max_dr in radial distance of that
-    pixel's center (the pixel itself always included).
+    the point (x0, y0): for each pixel, the new value is the plain mean
+    over the pixels in its neighbourhood, see polar_neighbourhood().
 
     Parameters
     ----------
@@ -296,11 +366,8 @@ def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr):
         Pixel center coordinates along x (nx values) and y (ny values).
     x0, y0: astropy.units.Quantity
         Center of the polar coordinate system.
-    max_dphi: astropy.units.Quantity
-        Maximal azimuth difference (angle between the lines joining
-        (x0, y0) to the two pixel centers).
-    max_dr: astropy.units.Quantity
-        Maximal radial distance difference from (x0, y0).
+    max_dphi, max_dr, max_dist: astropy.units.Quantity
+        Neighbourhood limits, see polar_neighbourhood().
 
     Returns
     -------
@@ -310,23 +377,14 @@ def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr):
     unit = getattr(values, 'unit', None)
     values = np.asarray(getattr(values, 'value', values), dtype=float)
 
-    xx, yy = np.meshgrid((x - x0).to_value(u.deg), (y - y0).to_value(u.deg), indexing='ij')
-    r = np.hypot(xx, yy).ravel()
-    phi = np.arctan2(yy, xx).ravel()
-
-    # Small tolerance, so that pixels exactly on the neighbourhood
-    # boundary (common on a regular grid) are not lost to round-off.
-    tol = 1e-9
-    dphi_lim = max_dphi.to_value(u.rad) + tol
-    dr_lim = max_dr.to_value(u.deg) + tol
+    geometry = _polar_geometry(x, y, x0, y0)
+    limits = _polar_limits(max_dphi, max_dr, max_dist)
 
     flat = values.reshape(values.shape[:-2] + (-1,))
     averaged = np.empty_like(flat)
 
-    for i in range(r.size):
-        dphi = (phi - phi[i] + np.pi) % (2*np.pi) - np.pi
-        neighbours = (np.abs(dphi) <= dphi_lim) & (np.abs(r - r[i]) <= dr_lim)
-        averaged[..., i] = flat[..., neighbours].mean(axis=-1)
+    for k in range(flat.shape[-1]):
+        averaged[..., k] = flat[..., _polar_neighbours(geometry, k, limits)].mean(axis=-1)
 
     averaged = averaged.reshape(values.shape)
     if unit is not None:
@@ -941,7 +999,7 @@ f"""{type(self).__name__} instance
         e0 = (emin * emax)**0.5
         return (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
 
-    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.5*u.deg):
+    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.5*u.deg, max_dist=0.15*u.deg):
         """
         Bayesian posterior rate (see posterior_rate()), smoothed by a
         moving average over polar neighbourhoods around the fitted
@@ -977,6 +1035,10 @@ f"""{type(self).__name__} instance
         max_dr: astropy.units.Quantity
             Maximal difference in radial distance from the core peak
             of the pixels averaged together. Defaults to 0.5 deg.
+        max_dist: astropy.units.Quantity
+            Distance between pixel centers within which pixels are
+            always averaged together, whatever max_dphi and max_dr
+            (see polar_neighbourhood()). Defaults to 0.15 deg.
 
         Returns
         -------
@@ -984,11 +1046,7 @@ f"""{type(self).__name__} instance
             Smoothed posterior rate, of the same shape as
             CameraImage.counts.
         """
-        # x0_core, y0_core are the 3rd and 4th camera_response()
-        # parameters, in degrees (see fit_camera_response()).
-        x0 = result.x[2] * u.deg
-        y0 = result.x[3] * u.deg
-
+        x0, y0 = self._core_peak(result)
         x = (self.xedges[1:] + self.xedges[:-1]) / 2
         y = (self.yedges[1:] + self.yedges[:-1]) / 2
 
@@ -996,8 +1054,8 @@ f"""{type(self).__name__} instance
         posterior_density = posterior / self.pixel_area
         model_density = result.model_rate / self.pixel_area
 
-        averaged = polar_moving_average(posterior_density, x, y, x0, y0, max_dphi, max_dr)
-        model_averaged = polar_moving_average(model_density, x, y, x0, y0, max_dphi, max_dr)
+        averaged = polar_moving_average(posterior_density, x, y, x0, y0, max_dphi, max_dr, max_dist)
+        model_averaged = polar_moving_average(model_density, x, y, x0, y0, max_dphi, max_dr, max_dist)
 
         # Shape correction f_i / <f>_i; left out (i.e. 1) where the
         # neighbourhood model average vanishes.
@@ -1023,7 +1081,7 @@ f"""{type(self).__name__} instance
 
         return smoothed * scale[:, None, None]
 
-    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.5*u.deg, index=-2):
+    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.5*u.deg, max_dist=0.15*u.deg, index=-2):
         """
         Same as posterior_differential_rate(), but based on the
         smoothed posterior rate of smoothed_posterior_rate().
@@ -1034,7 +1092,7 @@ f"""{type(self).__name__} instance
             Result of fit_camera_response(), see posterior_counts().
         prior_strength: float
             Prior weight, see posterior_counts().
-        max_dphi, max_dr: astropy.units.Quantity
+        max_dphi, max_dr, max_dist: astropy.units.Quantity
             Smoothing neighbourhood, see smoothed_posterior_rate().
         index: float
             Power law spectral index, see differential_rate().
@@ -1047,10 +1105,154 @@ f"""{type(self).__name__} instance
             the camera image.
         """
         rate = self.smoothed_posterior_rate(
-            result, prior_strength=prior_strength, max_dphi=max_dphi, max_dr=max_dr
+            result, prior_strength=prior_strength, max_dphi=max_dphi, max_dr=max_dr, max_dist=max_dist
         )
 
         return rate / self.pixel_area * self._int2diff(index)[:, None, None]
+
+    @staticmethod
+    def _core_peak(result):
+        """Fitted Gaussian core peak (x0_core, y0_core) of camera_response()."""
+        # x0_core, y0_core are the 3rd and 4th camera_response()
+        # parameters, in degrees (see fit_camera_response()).
+        return result.x[2] * u.deg, result.x[3] * u.deg
+
+    def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.5*u.deg, max_dist=0.15*u.deg, pixels=None, ax_unit='deg'):
+        """
+        Illustrate the smoothing neighbourhood of smoothed_posterior_rate()
+        (see polar_neighbourhood()) for example pixels: the pixels
+        averaged together are filled, the example pixel is outlined,
+        and the polar (max_dphi, max_dr) and distance (max_dist)
+        limits are drawn as dashed lines around it.
+
+        The fitted camera_response() spatial components are overlaid:
+        the Gaussian core as its 1 sigma circle (at e = e0, where its
+        width is sigma_core0), and the King function tail as its
+        sigma ellipse (semi-axes sigma_tail / sqrt(1 - ecc_tail) and
+        sigma_tail * sqrt(1 - ecc_tail), rotated by phi_tail), i.e.
+        the contour r2 = 1 in king_function(). This is the same width
+        scale as the Gaussian sigma, to which the King function reduces
+        for gamma_tail -> infinity.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), giving the core peak.
+        max_dphi, max_dr, max_dist: astropy.units.Quantity
+            Neighbourhood limits, see smoothed_posterior_rate().
+        pixels: list of tuple of int, optional
+            (i, j) indices of the example pixels. Defaults to two
+            pixels: the one closest to the core peak, and one far from
+            it (at 70% of the smaller half-extent of the camera, toward
+            the upper right).
+        ax_unit: str
+            Unit to use for the x/y axes.
+
+        Returns
+        -------
+        fig, ax: matplotlib figure and axes
+        """
+        from matplotlib.colors import ListedColormap
+        from matplotlib.patches import Circle, Ellipse, Rectangle, Wedge
+
+        x0, y0 = self._core_peak(result)
+        x = (self.xedges[1:] + self.xedges[:-1]) / 2
+        y = (self.yedges[1:] + self.yedges[:-1]) / 2
+        xx, yy = np.meshgrid(x.to_value(u.deg), y.to_value(u.deg), indexing='ij')
+
+        if pixels is None:
+            half = min(np.ptp(self.xedges), np.ptp(self.yedges)).to_value(u.deg) / 2
+            far = (x0.to_value(u.deg) + 0.7*half*np.cos(np.pi/4), y0.to_value(u.deg) + 0.7*half*np.sin(np.pi/4))
+            pixels = [
+                np.unravel_index(np.argmin(np.hypot(xx - x0.to_value(u.deg), yy - y0.to_value(u.deg))), xx.shape),
+                np.unravel_index(np.argmin(np.hypot(xx - far[0], yy - far[1])), xx.shape),
+            ]
+
+        # Categorical slots 1 and 2 (blue, orange) of the reference palette.
+        colors = ['#2a78d6', '#eb6834']
+
+        to_unit = lambda q: q.to_value(ax_unit)
+        fig, ax = pyplot.subplots(figsize=(7, 7 * np.ptp(self.yedges) / np.ptp(self.xedges) + 0.5))
+
+        # Faint pixel grid.
+        ax.pcolormesh(
+            to_unit(self.xedges), to_unit(self.yedges), np.zeros((len(y), len(x))),
+            cmap=ListedColormap(['white']), edgecolors='#e0e0e0', linewidth=0.5
+        )
+
+        for n, (index, color) in enumerate(zip(pixels, colors * len(pixels))):
+            index = tuple(int(v) for v in index)
+            neighbours = polar_neighbourhood(x, y, x0, y0, index, max_dphi, max_dr, max_dist)
+
+            ax.pcolormesh(
+                to_unit(self.xedges), to_unit(self.yedges),
+                np.ma.masked_where(~neighbours.T, np.ones(neighbours.T.shape)),
+                cmap=ListedColormap([color]), alpha=0.45
+            )
+
+            i, j = index
+            ax.add_patch(Rectangle(
+                (to_unit(self.xedges[i]), to_unit(self.yedges[j])),
+                to_unit(self.xedges[i+1] - self.xedges[i]), to_unit(self.yedges[j+1] - self.yedges[j]),
+                fill=False, edgecolor=color, linewidth=2
+            ))
+
+            # Limits: annular sector (polar condition) and circle (distance condition).
+            dx = (x[i] - x0).to_value(u.deg)
+            dy = (y[j] - y0).to_value(u.deg)
+            r = np.hypot(dx, dy)
+            phi = np.degrees(np.arctan2(dy, dx))
+            r_out = r + max_dr.to_value(u.deg)
+            r_in = max(0.0, r - max_dr.to_value(u.deg))
+            dphi = max_dphi.to_value(u.deg)
+            ax.add_patch(Wedge(
+                (to_unit(x0), to_unit(y0)), (r_out * u.deg).to_value(ax_unit), phi - dphi, phi + dphi,
+                width=((r_out - r_in) * u.deg).to_value(ax_unit),
+                fill=False, edgecolor=color, linestyle='--', linewidth=1.2
+            ))
+            ax.add_patch(Circle(
+                (to_unit(x[i]), to_unit(y[j])), to_unit(max_dist),
+                fill=False, edgecolor=color, linestyle=':', linewidth=1.5
+            ))
+
+            ax.plot([], [], 's', color=color, alpha=0.6,
+                    label=f'Pixel ({i}, {j}), r = {r:.2f} deg: {neighbours.sum()} pixels averaged')
+
+        ax.plot(to_unit(x0), to_unit(y0), '+', color='black', markersize=12, markeredgewidth=2, label='Gaussian core peak')
+
+        # Fitted spatial components (see camera_response() for the
+        # parameter order).
+        sigma_core0 = result.x[0] * u.deg
+        sigma_tail, gamma_tail, ecc_tail, phi_tail = result.x[4:8]
+        e0 = result.x[11] * u.TeV
+        ax.add_patch(Circle(
+            (to_unit(x0), to_unit(y0)), to_unit(sigma_core0),
+            fill=False, edgecolor='black', linewidth=1.5
+        ))
+        ax.plot([], [], '-', color='black',
+                label=f'Gaussian core 1 sigma at e0 = {e0:.2f} (sigma = {sigma_core0:.2f})')
+
+        semi_major = sigma_tail / np.sqrt(1 - ecc_tail) * u.deg
+        semi_minor = sigma_tail * np.sqrt(1 - ecc_tail) * u.deg
+        ax.add_patch(Ellipse(
+            (0, 0), 2*to_unit(semi_major), 2*to_unit(semi_minor), angle=np.degrees(phi_tail),
+            fill=False, edgecolor='black', linestyle='-.', linewidth=1.5
+        ))
+        ax.plot([], [], '-.', color='black',
+                label=f'King tail sigma ellipse ({semi_major:.2f} x {semi_minor:.2f}, gamma = {gamma_tail:.2f})')
+        ax.plot([], [], '--', color='gray', label=f'|dphi| <= {max_dphi.to_value(u.deg):g} deg, |dr| <= {max_dr.to_value(u.deg):g} deg')
+        ax.plot([], [], ':', color='gray', label=f'distance <= {max_dist.to_value(u.deg):g} deg')
+
+        ax.set_xlim(to_unit(self.xedges[0]), to_unit(self.xedges[-1]))
+        ax.set_ylim(to_unit(self.yedges[0]), to_unit(self.yedges[-1]))
+        ax.set_aspect('equal')
+        ax.set_xlabel(f'X [{ax_unit}]')
+        ax.set_ylabel(f'Y [{ax_unit}]')
+        ax.set_title('Smoothing neighbourhoods')
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=1, frameon=False, fontsize='small')
+        fig.tight_layout()
+
+        return fig, ax
 
     def plot_fit_check(self, result, energy_bin_id=0, smoothing=None, residual_min_width=0.3*u.deg, ax_unit='deg', cmap='viridis', prior_strength=10.0, val_unit='1 / (s deg2)'):
         """
@@ -1087,7 +1289,7 @@ f"""{type(self).__name__} instance
         energy_bin_id: int
             Energy bin to plot.
         smoothing: dict, optional
-            Keyword arguments (max_dphi, max_dr) of
+            Keyword arguments (max_dphi, max_dr, max_dist) of
             smoothed_posterior_rate() for the smoothed panel, which
             is also used as the model of the residual panel. If None
             (default), that panel is left empty and the residual is

@@ -133,11 +133,17 @@ POSTERIOR_PRIOR_STRENGTH = 25.0
 # background model written out by write_maps(): pixels whose centers,
 # seen from the fitted Gaussian core peak, are within
 # SMOOTHING_MAX_DPHI in azimuth and SMOOTHING_MAX_DR in radial
-# distance are averaged together, then corrected with the fitted model
+# distance (or within SMOOTHING_MAX_DIST of each other, see below) are
+# averaged together, then corrected with the fitted model
 # shape and renormalized to the posterior total per energy bin (see
 # CameraImage.smoothed_posterior_rate()).
 SMOOTHING_MAX_DPHI = 10 * u.deg
 SMOOTHING_MAX_DR = 0.5 * u.deg
+# Pixels whose centers are within this distance of each other are
+# always averaged together, whatever their azimuth and radial distance.
+# This keeps the neighbourhood from shrinking to a thin sliver near the
+# core peak, which otherwise leaves a radial pattern there.
+SMOOTHING_MAX_DIST = 0.15 * u.deg
 
 # list of class attributes, which have a unit assigned
 quantity_list = [
@@ -470,8 +476,8 @@ class BkgMakerBase:
             Background map to plot.
         base_path : str
             Output path without extension. '_map_bin<i>.png',
-            '_fit_check_bin<i>.png' and '_fit_spectrum.png' are
-            appended to it.
+            '_fit_check_bin<i>.png', '_fit_spectrum.png' and
+            '_smoothing_neighbourhood.png' are appended to it.
         result : scipy.optimize.OptimizeResult, optional
             Result of bkg_map.fit_camera_response(), must have a
             model_counts attribute, used as the posterior_counts()
@@ -492,7 +498,9 @@ class BkgMakerBase:
             if result is not None:
                 fig, _ = bkg_map.plot_fit_check(
                     result, energy_bin_id=i, prior_strength=prior_strength,
-                    smoothing=dict(max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR)
+                    smoothing=dict(
+                        max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST
+                    )
                 )
                 fig.savefig(f"{base_path}_fit_check_bin{i}.png")
                 pyplot.close(fig)
@@ -500,6 +508,13 @@ class BkgMakerBase:
         if result is not None:
             fig, _ = bkg_map.plot_fit_spectrum(result, prior_strength=prior_strength)
             fig.savefig(f"{base_path}_fit_spectrum.png")
+            pyplot.close(fig)
+
+            fig, _ = bkg_map.plot_smoothing_neighbourhood(
+                result, max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST
+            )
+            # The legend sits below the axes; keep it in the image.
+            fig.savefig(f"{base_path}_smoothing_neighbourhood.png", bbox_inches='tight')
             pyplot.close(fig)
 
     @staticmethod
@@ -522,7 +537,8 @@ class BkgMakerBase:
         If the fit succeeded, the posterior is additionally smoothed
         before writing, by a moving average over the pixels within
         SMOOTHING_MAX_DPHI in azimuth and SMOOTHING_MAX_DR in radial
-        distance, seen from the fitted Gaussian core peak, corrected
+        distance, seen from the fitted Gaussian core peak, or within
+        SMOOTHING_MAX_DIST of the pixel itself, corrected
         with the fitted model shape and renormalized to the posterior
         total per energy bin (see CameraImage.smoothed_posterior_rate()).
 
@@ -578,7 +594,7 @@ class BkgMakerBase:
             if fit_result is not None:
                 dnde = bkg_map.smoothed_posterior_differential_rate(
                     fit_result, prior_strength=POSTERIOR_PRIOR_STRENGTH,
-                    max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR
+                    max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST
                 )
 
             bkg_map.to_hdu(bkg_rate=dnde).writeto(key, overwrite=overwrite)
