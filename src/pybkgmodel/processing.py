@@ -58,7 +58,15 @@ def default_camera_response_guess(bkg_map):
     x_range = x_max - x_min
     e0_guess = 1.0
 
-    sigma_core0 = x_range / 4
+    # The core and tail widths are kept in separate ranges, split at a
+    # quarter of the FOV extent: the core is the narrower component,
+    # the tail the wider one. Without this, the fit can swap the two
+    # roles (a Gaussian wider than the FOV acting as a flat pedestal,
+    # and a narrow King function forming the peak), which leaves the
+    # core center (x0_core, y0_core) unconstrained by the data.
+    sigma_split = x_range / 4
+
+    sigma_core0 = sigma_split / 2
     delta_sigma_core0 = 0.0
     x0_core0, y0_core0 = 0.0, 0.0
 
@@ -93,12 +101,13 @@ def default_camera_response_guess(bkg_map):
     ]
 
     bounds = [
-        (sigma_core0 / 10, sigma_core0 * 10),  # sigma_core0
+        (x_range / 100, sigma_split),      # sigma_core0 (narrower than the tail)
         (-3.0, 3.0),                       # delta_sigma_core
         (x_min, x_max),                    # x0_core
         (y_min, y_max),                    # y0_core
-        (sigma_tail0 / 5, x_range),         # sigma_tail (capped at the FOV extent:
-                                            # wider halos aren't constrained by the data)
+        (sigma_split, x_range),            # sigma_tail (wider than the core, capped
+                                            # at the FOV extent: wider halos aren't
+                                            # constrained by the data)
         (1.2, 10.0),                       # gamma_tail (kept off the near-singular
                                             # King normalization at gamma -> 1)
         (0.0, 0.9),                        # ecc_tail
