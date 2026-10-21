@@ -156,7 +156,8 @@ def default_camera_response_guess(bkg_map):
         (x_min, x_max),                    # x0
         (y_min, y_max),                    # y0
         (0.5, 5.0),                        # p_lo
-        (0.5, 5.0),                        # p_hi
+        (0.3, 5.0),                        # p_hi (high energies favour a
+                                            # peaked shape, p < 1)
         (0.0, 0.9),                        # ecc_lo
         (0.0, 0.9),                        # ecc_hi
         (-np.pi / 2, np.pi / 2),           # phi
@@ -565,8 +566,12 @@ class BkgMakerBase:
         path. The output follows the definition in
         https://gamma-astro-data-formats.readthedocs.io/
 
-        Prior to writing, a camera_response() model (see
-        pybkgmodel.camera.CameraImage.fit_camera_response()) is fit to
+        Prior to writing, each map is restricted to the circular field
+        of view inscribed in its binning (see
+        pybkgmodel.camera.CameraImage.mask_outside_fov()): the pixels
+        outside are masked, and the background written out there is 0.
+        A camera_response() model (see
+        pybkgmodel.camera.CameraImage.fit_camera_response()) is then fit to
         each map's observed counts, and used as the prior for a
         bin-by-bin Bayesian update against the observed counts (see
         CameraImage.posterior_counts(), with prior weight
@@ -598,6 +603,11 @@ class BkgMakerBase:
         """
 
         for key, bkg_map in bkg_maps.items():
+            # Only the circular field of view inscribed in the binned
+            # area is fit, and the model is 0 outside of it.
+            radius = bkg_map.mask_outside_fov()
+            message(f"Restricting the background model to {radius:.2f} from the camera center.")
+
             p0, bounds = default_camera_response_guess(bkg_map)
 
             dnde = None

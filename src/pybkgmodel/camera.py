@@ -688,6 +688,9 @@ class CameraImage:
         self.center = center
         self.mask = mask
         self.raw_exposure = exposure
+        # Radius of the field of view, see mask_outside_fov(); None
+        # means the whole binned area.
+        self.fov_radius = None
 
         self.pixel_coords = self.get_pixel_coords()
         self.pixel_area = self.get_pixel_areas()
@@ -923,7 +926,8 @@ f"""{type(self).__name__} instance
             map of the same shape as CameraImage.counts -- additionally
             rescaled per energy bin so that its sum over the unmasked
             pixels exactly equals the observed counts' sum over the
-            same pixels (see mask, mask_half(), mask_region()).
+            same pixels (see mask, mask_half(), mask_region()), and set
+            to 0 outside of the field of view (see mask_outside_fov()).
         """
         x = ((self.xedges[1:] + self.xedges[:-1]) / 2).to_value(u.deg)
         y = ((self.yedges[1:] + self.yedges[:-1]) / 2).to_value(u.deg)
@@ -954,7 +958,10 @@ f"""{type(self).__name__} instance
             **kwargs
         )
 
-        result.model_counts = camera_response(xx, yy, ee, *result.x) * exposure
+        # The model is 0 outside of the field of view (see
+        # mask_outside_fov()).
+        inside_fov = self.inside_fov[None, :, :]
+        result.model_counts = camera_response(xx, yy, ee, *result.x) * exposure * inside_fov
 
         # Rescale the model, per energy bin, so that its sum over the
         # unmasked pixels exactly matches the observed counts' sum
@@ -976,7 +983,7 @@ f"""{type(self).__name__} instance
         # / posterior_differential_rate() fall back to there instead of
         # dividing by zero. The same per-energy-bin rescaling as
         # model_counts above is applied here too, for consistency.
-        result.model_rate = camera_response(xx, yy, ee, *result.x) / u.s * scale[:, None, None]
+        result.model_rate = camera_response(xx, yy, ee, *result.x) * inside_fov / u.s * scale[:, None, None]
 
         return result
 
@@ -1708,10 +1715,57 @@ f"""{type(self).__name__} instance
         in_region = region.contains(self.pixel_coords, dummy_wcs)
         self.mask[in_region] = False
 
+    def mask_outside_fov(self, radius=None):
+        """Masks all camera pixels whose centers are further than radius
+        from the camera center, and restricts the fitted model to the
+        field of view (see inside_fov, fit_camera_response()): the model
+        is 0 outside of it. The corners of the rectangular binning lie
+        outside the camera, where there are (almost) no events; fitting
+        them would pull the model's tail down at the camera edge.
+
+        Parameters
+        ----------
+        radius : astropy.units.Quantity, optional
+            Field of view radius. Defaults to the smallest absolute value
+            of the x and y bin edge limits, i.e. the largest circle
+            around the camera center within the binned area.
+
+        Returns
+        -------
+        radius : astropy.units.Quantity
+            Field of view radius used.
+        """
+        if radius is None:
+            radius = u.Quantity([abs(self.xedges[0]), abs(self.xedges[-1]),
+                                 abs(self.yedges[0]), abs(self.yedges[-1])]).min()
+
+        self.fov_radius = radius
+        self.mask = self.mask & self.inside_fov
+
+        return radius
+
+    @property
+    def inside_fov(self):
+        """Whether each camera pixel's center lies within fov_radius of
+        the camera center (all True if fov_radius is None), see
+        mask_outside_fov()."""
+        nx = self.xedges.size - 1
+        ny = self.yedges.size - 1
+        if self.fov_radius is None:
+            return np.ones((nx, ny), dtype=bool)
+
+        x = ((self.xedges[1:] + self.xedges[:-1]) / 2).to_value(u.deg)
+        y = ((self.yedges[1:] + self.yedges[:-1]) / 2).to_value(u.deg)
+        xx, yy = np.meshgrid(x, y, indexing='ij')
+
+        return np.hypot(xx, yy) <= self.fov_radius.to_value(u.deg)
+
     def mask_reset(self):
-        """_summary_
+        """Unmasks all camera pixels and clears the field of view
+        restriction (see mask_outside_fov()).
         """
         self.mask = np.ones((self.xedges.size - 1, self.yedges.size - 1), dtype=bool)
+        self.fov_radius = None
 
 
     def plot(self, energy_bin_id=0, ax_unit='deg', val_unit='1/s', **kwargs):
