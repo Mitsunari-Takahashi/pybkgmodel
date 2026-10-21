@@ -885,7 +885,7 @@ f"""{type(self).__name__} instance
 
         return dnde, result
 
-    def fit_energy_range(self, min_counts=100):
+    def fit_energy_range(self, min_counts=1000):
         """
         Energy bins included in fit_camera_response(): the bin with the
         highest total count (in the unmasked pixels) and all bins above
@@ -898,7 +898,10 @@ f"""{type(self).__name__} instance
         min_counts: float
             Minimal total count (in the unmasked pixels) of an energy
             bin for it to count as constraining the spatial shape,
-            see e_lo, e_hi below. Defaults to 100.
+            see e_lo, e_hi below. Defaults to 1000, so that the shape
+            parameters given at e_lo and e_hi (see camera_response())
+            are set where the data constrain them well rather than
+            extrapolated from a few events.
 
         Returns
         -------
@@ -1654,6 +1657,11 @@ f"""{type(self).__name__} instance
         ratio, its value is the same whether computed from counts or
         from the corresponding rates.
 
+        Data points in energy bins used in the fit (see
+        fit_energy_range()) are filled, the others open, and dotted
+        lines mark e_lo and e_hi, the energies at which the shape
+        parameters are given (see camera_response()).
+
         Parameters
         ----------
         result: scipy.optimize.OptimizeResult
@@ -1704,17 +1712,28 @@ f"""{type(self).__name__} instance
             gridspec_kw=dict(height_ratios=[3, 1])
         )
 
-        ax_spec.errorbar(e, data, yerr=data_err, fmt='o', color='k', label='Data')
+        fitted, _, _ = self.fit_energy_range()
+        params = camera_response_params(result)
+
+        for sel, mfc, label in ((fitted, 'k', 'Data (fitted)'), (~fitted, 'none', 'Data (not fitted)')):
+            if sel.any():
+                ax_spec.errorbar(e[sel], data[sel], yerr=data_err[sel], fmt='o', color='k', mfc=mfc, label=label)
+                ax_pull.plot(e[sel], residual[sel], 'o', color='k', mfc=mfc)
         ax_spec.plot(e, model, '-', color='C1', label='Posterior')
+
+        for ax in (ax_spec, ax_pull):
+            for name in ('e_lo', 'e_hi'):
+                ax.axvline((params[name] * u.TeV).to_value(e_unit), color='gray', ls=':')
+        ax_spec.plot([], [], ':', color='gray',
+                     label=f"Shape reference energies ({params['e_lo']:.2f}, {params['e_hi']:.1f} TeV)")
         ax_spec.set_xscale('log')
         ax_spec.set_yscale('log')
         ax_spec.set_xlim(left=0.1)
         ax_spec.set_ylim(bottom=np.min(data[data > 0]) / 2, top=1.5 * data.max())
         ax_spec.set_ylabel(f'Rate [{val_unit}]')
-        ax_spec.legend()
+        ax_spec.legend(fontsize="small")
 
         ax_pull.axhline(0, color='gray', ls='--')
-        ax_pull.plot(e, residual, 'o', color='k')
         ax_pull.set_xlabel(f'Energy [{e_unit}]')
         ax_pull.set_ylabel('Residual')
         ax_pull.set_ylim(-2, 2)
@@ -1818,10 +1837,16 @@ f"""{type(self).__name__} instance
     def plot(self, energy_bin_id=0, ax_unit='deg', val_unit='1/s', **kwargs):
         pyplot.xlabel(f'X [{ax_unit}]')
         pyplot.ylabel(f'Y [{ax_unit}]')
+        # Masked pixels (e.g. always inside an exclusion region, with
+        # zero exposure) are left blank instead of giving 0/0.
+        with np.errstate(invalid='ignore', divide='ignore'):
+            rate = (self.counts[energy_bin_id] / self.raw_exposure).to_value(val_unit)
+        rate[~self.mask] = np.nan
+
         pyplot.pcolormesh(
             self.xedges.to(ax_unit).value,
             self.yedges.to(ax_unit).value,
-            (self.counts[energy_bin_id] / self.raw_exposure).to_value(val_unit).transpose(),
+            rate.transpose(),
             **kwargs
         )
         pyplot.colorbar(label=f'rate [{val_unit}]')
