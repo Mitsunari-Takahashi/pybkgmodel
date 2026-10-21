@@ -174,7 +174,7 @@ SMOOTHING_MAX_DR = 0.25 * u.deg
 # always averaged together, whatever their azimuth and radial distance.
 # This keeps the neighbourhood from shrinking to a thin sliver near the
 # core peak, which otherwise leaves a radial pattern there.
-SMOOTHING_MAX_DIST = 0.15 * u.deg
+SMOOTHING_MAX_DIST = 0.25 * u.deg
 
 # list of class attributes, which have a unit assigned
 quantity_list = [

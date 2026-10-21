@@ -1071,7 +1071,7 @@ f"""{type(self).__name__} instance
         e0 = (emin * emax)**0.5
         return (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
 
-    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg):
+    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg):
         """
         Bayesian posterior rate (see posterior_rate()), smoothed by a
         moving average over polar neighbourhoods around the fitted
@@ -1107,11 +1107,11 @@ f"""{type(self).__name__} instance
         max_dr: astropy.units.Quantity
             Maximal difference in radial distance from the core peak
             of the pixels averaged together, counted as negative across
-            the peak (see polar_neighbourhood()). Defaults to 0.15 deg.
+            the peak (see polar_neighbourhood()). Defaults to 0.25 deg.
         max_dist: astropy.units.Quantity
             Distance between pixel centers within which pixels are
             always averaged together, whatever max_dphi and max_dr
-            (see polar_neighbourhood()). Defaults to 0.15 deg.
+            (see polar_neighbourhood()). Defaults to 0.25 deg.
 
         Returns
         -------
@@ -1154,7 +1154,7 @@ f"""{type(self).__name__} instance
 
         return smoothed * scale[:, None, None]
 
-    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg, index=-2):
+    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg, index=-2):
         """
         Same as posterior_differential_rate(), but based on the
         smoothed posterior rate of smoothed_posterior_rate().
@@ -1189,7 +1189,7 @@ f"""{type(self).__name__} instance
         params = camera_response_params(result)
         return params['x0_core'] * u.deg, params['y0_core'] * u.deg
 
-    def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg, pixels=None, energy_bin_id=None, ax_unit='deg'):
+    def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg, pixels=None, energy_bin_id=None, ax_unit='deg'):
         """
         Illustrate the smoothing neighbourhood of smoothed_posterior_rate()
         (see polar_neighbourhood()) for example pixels: the pixels
