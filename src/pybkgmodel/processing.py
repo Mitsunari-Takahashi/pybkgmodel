@@ -67,6 +67,8 @@ def default_camera_response_guess(bkg_map):
     sigma_split = x_range / 4
 
     sigma_core0 = sigma_split / 2
+    # The core width is energy independent for now: delta_sigma_core
+    # is fixed to 0 (see the bounds below).
     delta_sigma_core0 = 0.0
     x0_core0, y0_core0 = 0.0, 0.0
 
@@ -106,7 +108,7 @@ def default_camera_response_guess(bkg_map):
 
     bounds = [
         (x_range / 100, sigma_split),      # sigma_core0 (narrower than the tail)
-        (-3.0, 3.0),                       # delta_sigma_core
+        (delta_sigma_core0, delta_sigma_core0),  # delta_sigma_core (fixed, see above)
         (x_min, x_max),                    # x0_core
         (y_min, y_max),                    # y0_core
         (sigma_split, x_range),            # sigma_tail (wider than the core, capped
