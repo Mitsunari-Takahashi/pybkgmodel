@@ -223,16 +223,46 @@ def core_fraction(e, w0, delta_w, e0):
     return 1 / (1 + np.exp(-(w_logit0 + delta_w*np.log(e/e0))))
 
 
+# Names of the camera_response() fit parameters, in the order expected
+# by camera_response() and CameraImage.fit_camera_response(), and of
+# result.x returned by the latter (see camera_response_params()).
+CAMERA_RESPONSE_PARAM_NAMES = (
+    'sigma_core0', 'delta_sigma_core', 'x0_core', 'y0_core',
+    'sigma_tail', 'ecc_tail', 'phi_tail',
+    'w0', 'delta_w',
+    'norm', 'e0', 'alpha', 'beta',
+)
+
+
+def camera_response_params(result):
+    """
+    Fitted camera_response() parameters by name.
+
+    Parameters
+    ----------
+    result: scipy.optimize.OptimizeResult
+        Result of CameraImage.fit_camera_response().
+
+    Returns
+    -------
+    params: dict
+        Parameter values, keyed by CAMERA_RESPONSE_PARAM_NAMES. Widths
+        and centers are in degrees, e0 in TeV.
+    """
+    return dict(zip(CAMERA_RESPONSE_PARAM_NAMES, result.x))
+
+
 def camera_response(x, y, e,
                      sigma_core0, delta_sigma_core, x0_core, y0_core,
-                     sigma_tail, gamma_tail, ecc_tail, phi_tail,
+                     sigma_tail, ecc_tail, phi_tail,
                      w0, delta_w,
                      norm, e0, alpha, beta):
     """
     Camera background response model, defined as the product of:
     1. a spatial (x, y) distribution, itself the sum of two components:
        a. a circularly symmetric 2D Gaussian "core", and
-       b. an elliptical 2D King function "tail" (see king_function()),
+       b. an elliptical 2D Gaussian "tail" (a super_gaussian() with
+          p = 1),
        mixed as w*core + (1-w)*tail, with each individually normalized
        to integrate to 1 over the camera plane, so w is the fraction
        of the spatial distribution's total (normalized) weight
@@ -277,9 +307,9 @@ def camera_response(x, y, e,
         p = 1, ecc = 0, phi = 0). sigma_core0 is its width at e = e0,
         and delta_sigma_core its power-law energy dependence (see
         above); x0_core, y0_core its (energy-independent) center.
-    sigma_tail, gamma_tail, ecc_tail, phi_tail: array_like
-        Parameters of the King function tail, see king_function(),
-        fixed at the camera center (0, 0).
+    sigma_tail, ecc_tail, phi_tail: array_like
+        Parameters of the elliptical Gaussian tail (a super_gaussian()
+        with p = 1), fixed at the camera center (0, 0).
     w0, delta_w: array_like
         Fraction (0 < w < 1) of the spatial distribution's weight in
         the core, vs. (1 - w) in the tail (see above). w0 is its value
@@ -297,8 +327,8 @@ def camera_response(x, y, e,
 
     w = core_fraction(e, w0, delta_w, e0)
 
-    core =super_gaussian(x, y, sigma_core, p=1.0, x0=x0_core, y0=y0_core)
-    tail = king_function(x, y, sigma_tail, gamma_tail, ecc=ecc_tail, phi=phi_tail)
+    core = super_gaussian(x, y, sigma_core, p=1.0, x0=x0_core, y0=y0_core)
+    tail = super_gaussian(x, y, sigma_tail, p=1.0, ecc=ecc_tail, phi=phi_tail)
     spatial = w*core + (1 - w)*tail
 
     return (
@@ -803,8 +833,9 @@ f"""{type(self).__name__} instance
         p0: array_like
             Initial guess for the camera_response() fit parameters
             (sigma_core0, delta_sigma_core, x0_core, y0_core,
-            sigma_tail, gamma_tail, ecc_tail, phi_tail,
-            w0, delta_w, norm, e0, alpha, beta).
+            sigma_tail, ecc_tail, phi_tail,
+            w0, delta_w, norm, e0, alpha, beta), see
+            CAMERA_RESPONSE_PARAM_NAMES.
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
             in degrees and TeV respectively.
@@ -1151,9 +1182,8 @@ f"""{type(self).__name__} instance
     @staticmethod
     def _core_peak(result):
         """Fitted Gaussian core peak (x0_core, y0_core) of camera_response()."""
-        # x0_core, y0_core are the 3rd and 4th camera_response()
-        # parameters, in degrees (see fit_camera_response()).
-        return result.x[2] * u.deg, result.x[3] * u.deg
+        params = camera_response_params(result)
+        return params['x0_core'] * u.deg, params['y0_core'] * u.deg
 
     def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.15*u.deg, pixels=None, energy_bin_id=None, ax_unit='deg'):
         """
@@ -1165,12 +1195,9 @@ f"""{type(self).__name__} instance
 
         The fitted camera_response() spatial components are overlaid:
         the Gaussian core as its 1 sigma circle (at e = e0, where its
-        width is sigma_core0), and the King function tail as its
-        sigma ellipse (semi-axes sigma_tail / sqrt(1 - ecc_tail) and
-        sigma_tail * sqrt(1 - ecc_tail), rotated by phi_tail), i.e.
-        the contour r2 = 1 in king_function(). This is the same width
-        scale as the Gaussian sigma, to which the King function reduces
-        for gamma_tail -> infinity.
+        width is sigma_core0), and the elliptical Gaussian tail as its
+        1 sigma ellipse (semi-axes sigma_tail / sqrt(1 - ecc_tail) and
+        sigma_tail * sqrt(1 - ecc_tail), rotated by phi_tail).
 
         If energy_bin_id is given, the observed counts of that energy
         bin are shown underneath (masked pixels blank), the averaged
@@ -1309,11 +1336,11 @@ f"""{type(self).__name__} instance
             path_effects=[patheffects.withStroke(linewidth=4, foreground='white')], label='Gaussian core peak'
         )
 
-        # Fitted spatial components (see camera_response() for the
-        # parameter order).
-        sigma_core0, delta_sigma_core = result.x[0], result.x[1]
-        sigma_tail, gamma_tail, ecc_tail, phi_tail = result.x[4:8]
-        e0 = result.x[11] * u.TeV
+        # Fitted spatial components.
+        params = camera_response_params(result)
+        sigma_core0, delta_sigma_core = params['sigma_core0'], params['delta_sigma_core']
+        sigma_tail, ecc_tail, phi_tail = params['sigma_tail'], params['ecc_tail'], params['phi_tail']
+        e0 = params['e0'] * u.TeV
         if on_counts:
             e = np.sqrt(self.energy_edges[energy_bin_id] * self.energy_edges[energy_bin_id + 1]).to(u.TeV)
         else:
@@ -1333,7 +1360,7 @@ f"""{type(self).__name__} instance
             fill=False, edgecolor=tail_color, linestyle='-.', linewidth=1.8
         ))
         ax.plot([], [], '-.', color=tail_color,
-                label=f'King tail sigma ellipse ({semi_major:.2f} x {semi_minor:.2f}, gamma = {gamma_tail:.2f})')
+                label=f'Gaussian tail 1 sigma ellipse ({semi_major:.2f} x {semi_minor:.2f})')
         ax.plot([], [], '--', color='gray', label=f'|dphi| <= {max_dphi.to_value(u.deg):g} deg, |dr| <= {max_dr.to_value(u.deg):g} deg')
         ax.plot([], [], ':', color='gray', label=f'distance <= {max_dist.to_value(u.deg):g} deg')
 
@@ -1604,9 +1631,8 @@ f"""{type(self).__name__} instance
         -------
         fig, ax: matplotlib figure and axes
         """
-        # w0, delta_w and e0 are the 9th, 10th and 12th camera_response()
-        # parameters; e0 is in TeV (see fit_camera_response()).
-        w0, delta_w, e0 = result.x[8], result.x[9], result.x[11]
+        params = camera_response_params(result)
+        w0, delta_w, e0 = params['w0'], params['delta_w'], params['e0']
 
         e_fine = np.geomspace(self.energy_edges[0], self.energy_edges[-1], 200)
         e_center = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1])
@@ -1618,7 +1644,7 @@ f"""{type(self).__name__} instance
 
         ax.plot(e_fine.to_value(e_unit), w_fine, '-', color='C0', label='Core (Gaussian) $w$')
         ax.plot(e_center.to_value(e_unit), w_center, 'o', color='C0')
-        ax.plot(e_fine.to_value(e_unit), 1 - w_fine, '--', color='C1', label='Tail (King) $1 - w$')
+        ax.plot(e_fine.to_value(e_unit), 1 - w_fine, '--', color='C1', label='Tail (elliptical Gaussian) $1 - w$')
         ax.plot(e_center.to_value(e_unit), 1 - w_center, 'o', color='C1', mfc='none')
         ax.axvline((e0 * u.TeV).to_value(e_unit), color='gray', ls=':', label=f'$e_0$ ($w_0$ = {w0:.3g})')
 

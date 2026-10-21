@@ -20,14 +20,14 @@ from pybkgmodel.message import message
 from pybkgmodel.model import (WobbleMap,
                               ExclusionMap
                             )
-from pybkgmodel.camera import RectangularCameraImage
+from pybkgmodel.camera import RectangularCameraImage, CAMERA_RESPONSE_PARAM_NAMES
 
 # Order of the camera_response() fit parameters, as expected by
 # CameraImage.fit_camera_response() / fitted_differential_rate().
 # sigma_core0, delta_sigma_core, x0_core, y0_core: Gaussian core
 #   (camera acceptance shape's central component); x0_core/y0_core its
 #   (energy-independent) center.
-# sigma_tail, gamma_tail, ecc_tail, phi_tail: King function tail
+# sigma_tail, ecc_tail, phi_tail: elliptical Gaussian tail
 #   (extended halo component), fixed at the camera center.
 # w0, delta_w: fraction of the spatial distribution's weight in the
 #   core, and its energy dependence.
@@ -62,7 +62,7 @@ def default_camera_response_guess(bkg_map):
     # quarter of the FOV extent: the core is the narrower component,
     # the tail the wider one. Without this, the fit can swap the two
     # roles (a Gaussian wider than the FOV acting as a flat pedestal,
-    # and a narrow King function forming the peak), which leaves the
+    # and a narrow tail forming the peak), which leaves the
     # core center (x0_core, y0_core) unconstrained by the data.
     sigma_split = x_range / 4
 
@@ -71,10 +71,14 @@ def default_camera_response_guess(bkg_map):
     x0_core0, y0_core0 = 0.0, 0.0
 
     sigma_tail0 = x_range / 2
-    gamma_tail0 = 2.0
     ecc_tail0 = 0.1
     phi_tail0 = 0.0
 
+    # w0 (the core fraction at e = e0) is fixed to 0.5, which makes e0
+    # the energy at which the core and tail contribute equally (see
+    # core_fraction()). This removes the degeneracy of the reference
+    # energy e0, which could otherwise be traded against w0, norm,
+    # alpha, beta and sigma_core0 without changing the model.
     w0 = 0.5
     delta_w0 = -1.0
 
@@ -87,7 +91,7 @@ def default_camera_response_guess(bkg_map):
     # linear(y) function's intercept is fixed to 1 inside
     # camera_response() (see linear()), so it does not enter here.
     core_peak = 1 / (2 * np.pi * sigma_core0**2)
-    tail_peak = (1 - 1/gamma_tail0) / (2 * np.pi * sigma_tail0**2)
+    tail_peak = 1 / (2 * np.pi * sigma_tail0**2)
     spatial_peak = w0*core_peak + (1 - w0)*tail_peak
     exposure0 = bkg_map.raw_exposure[bkg_map.mask].mean().to_value(u.s)
     counts_peak = bkg_map.raw_counts.max()
@@ -95,7 +99,7 @@ def default_camera_response_guess(bkg_map):
 
     p0 = [
         sigma_core0, delta_sigma_core0, x0_core0, y0_core0,
-        sigma_tail0, gamma_tail0, ecc_tail0, phi_tail0,
+        sigma_tail0, ecc_tail0, phi_tail0,
         w0, delta_w0,
         norm0, e0_guess, alpha0, beta0,
     ]
@@ -108,29 +112,17 @@ def default_camera_response_guess(bkg_map):
         (sigma_split, x_range),            # sigma_tail (wider than the core, capped
                                             # at the FOV extent: wider halos aren't
                                             # constrained by the data)
-        (1.2, 10.0),                       # gamma_tail (kept off the near-singular
-                                            # King normalization at gamma -> 1)
         (0.0, 0.9),                        # ecc_tail
         (-np.pi / 2, np.pi / 2),           # phi_tail
-        (0.01, 0.99),                      # w0 (kept off the 0/1 logit boundary)
+        (w0, w0),                          # w0 (fixed, see above)
         (-10.0, -0.001),                       # delta_w
         (norm0 / 1e3, norm0 * 1e3),        # norm
-        (e0_guess * 0.9, e0_guess * 1.1),  # e0
+        (0.9, 10.0),                       # e0 (core/tail crossover energy, TeV)
         (0.0, 3.0),                      # alpha
         (-1.0, 1.0),                       # beta
     ]
 
     return p0, bounds
-
-# Names of the camera_response() fit parameters, in the same order as
-# p0/bounds above (and as result.x from fit_camera_response() /
-# fitted_differential_rate()); used to label the printed fit output.
-CAMERA_RESPONSE_PARAM_NAMES = (
-    'sigma_core0', 'delta_sigma_core', 'x0_core', 'y0_core',
-    'sigma_tail', 'gamma_tail', 'ecc_tail', 'phi_tail',
-    'w0', 'delta_w',
-    'norm', 'e0', 'alpha', 'beta',
-)
 
 # Prior weight (in equivalent prior "pseudo-counts") used to combine
 # the camera_response() fit (as the prior) with the observed counts
@@ -586,8 +578,11 @@ class BkgMakerBase:
             # L-BFGS-B is fast but can struggle when the fit parameters
             # span very different scales; retry with the more robust
             # (but slower) gradient-free Nelder-Mead before giving up.
+            # The default L-BFGS-B evaluation limit (15000) can be hit
+            # just before convergence, with the parameters already
+            # settled, so it is raised here.
             for method, options in (
-                ('L-BFGS-B', None),
+                ('L-BFGS-B', dict(maxfun=50000, maxiter=50000)),
                 ('Nelder-Mead', dict(maxiter=50000, maxfev=50000, adaptive=True)),
             ):
                 try:
