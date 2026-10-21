@@ -965,12 +965,16 @@ f"""{type(self).__name__} instance
             Result of fit_camera_response(), must have a model_counts
             attribute of the same shape as CameraImage.counts, used as
             the per-bin prior mean.
-        prior_strength: float
+        prior_strength: float or array_like
             Equivalent number of prior "pseudo-counts" k (k > 0)
             controlling how strongly the fitted model constrains the
             posterior relative to the data. Larger values weight the
             prior (the fit) more heavily; smaller values let the raw
-            data dominate. Defaults to 1.0.
+            data dominate. Either a single value for all bins, or one
+            per camera pixel (shape (nx, ny), the same for all energy
+            bins), e.g. proportional to the pixel solid angle so that
+            the relative weight does not depend on the binning.
+            Defaults to 1.0.
 
         Returns
         -------
@@ -1004,7 +1008,7 @@ f"""{type(self).__name__} instance
         result: scipy.optimize.OptimizeResult
             Result of fit_camera_response(), used as the prior, see
             posterior_counts().
-        prior_strength: float
+        prior_strength: float or array_like
             Prior weight, see posterior_counts().
 
         Returns
@@ -1035,7 +1039,7 @@ f"""{type(self).__name__} instance
         result: scipy.optimize.OptimizeResult
             Result of fit_camera_response(), used as the prior, see
             posterior_counts().
-        prior_strength: float
+        prior_strength: float or array_like
             Prior weight, see posterior_counts().
         index: float
             Power law spectral index used to convert the integrated,
@@ -1095,7 +1099,7 @@ f"""{type(self).__name__} instance
         ----------
         result: scipy.optimize.OptimizeResult
             Result of fit_camera_response(), see posterior_counts().
-        prior_strength: float
+        prior_strength: float or array_like
             Prior weight, see posterior_counts().
         max_dphi: astropy.units.Quantity
             Maximal azimuth difference, seen from the core peak, of
@@ -1103,7 +1107,7 @@ f"""{type(self).__name__} instance
         max_dr: astropy.units.Quantity
             Maximal difference in radial distance from the core peak
             of the pixels averaged together, counted as negative across
-            the peak (see polar_neighbourhood()). Defaults to 0.25 deg.
+            the peak (see polar_neighbourhood()). Defaults to 0.15 deg.
         max_dist: astropy.units.Quantity
             Distance between pixel centers within which pixels are
             always averaged together, whatever max_dphi and max_dr
@@ -1159,7 +1163,7 @@ f"""{type(self).__name__} instance
         ----------
         result: scipy.optimize.OptimizeResult
             Result of fit_camera_response(), see posterior_counts().
-        prior_strength: float
+        prior_strength: float or array_like
             Prior weight, see posterior_counts().
         max_dphi, max_dr, max_dist: astropy.units.Quantity
             Smoothing neighbourhood, see smoothed_posterior_rate().
@@ -1428,7 +1432,7 @@ f"""{type(self).__name__} instance
             Unit to use for the x/y axes.
         cmap: str
             Colormap to use for the data/posterior rate maps.
-        prior_strength: float
+        prior_strength: float or array_like
             Prior weight passed to posterior_counts() / posterior_rate().
             Defaults to 10.0.
         val_unit: str
@@ -1550,7 +1554,7 @@ f"""{type(self).__name__} instance
             attribute of the same shape as CameraImage.counts.
         e_unit: str
             Unit to use for the energy axis.
-        prior_strength: float
+        prior_strength: float or array_like
             Prior weight passed to posterior_counts() / posterior_rate().
             Defaults to 10.0.
         val_unit: str

@@ -126,11 +126,37 @@ def default_camera_response_guess(bkg_map):
 
     return p0, bounds
 
-# Prior weight (in equivalent prior "pseudo-counts") used to combine
-# the camera_response() fit (as the prior) with the observed counts
-# (as the data) into the Bayesian posterior background model written
-# out by write_maps(); see CameraImage.posterior_counts().
-POSTERIOR_PRIOR_STRENGTH = 25.0
+# Prior weight used to combine the camera_response() fit (as the
+# prior) with the observed counts (as the data) into the Bayesian
+# posterior background model written out by write_maps(); see
+# CameraImage.posterior_counts(). It is given per unit solid angle:
+# each pixel's prior weight k (in equivalent prior "pseudo-counts") is
+# this density times the pixel's solid angle (see
+# posterior_prior_strength()). A per-pixel constant k would make the
+# data weigh less the finer the binning, as the counts per pixel scale
+# with the pixel size while k would not. The reference is k = 25 for
+# a 0.3 deg x 0.3 deg pixel (k ~ 2.8 for 0.1 deg pixels).
+POSTERIOR_PRIOR_DENSITY = 25.0 / (0.3 * u.deg)**2
+
+
+def posterior_prior_strength(bkg_map):
+    """
+    Per-pixel prior weight k of the Bayesian posterior (see
+    CameraImage.posterior_counts()) for the given background map:
+    POSTERIOR_PRIOR_DENSITY times each pixel's solid angle.
+
+    Parameters
+    ----------
+    bkg_map: pybkgmodel.camera.CameraImage
+        Background map.
+
+    Returns
+    -------
+    k: numpy.ndarray
+        Prior weight in equivalent prior "pseudo-counts", of the shape
+        of the camera pixels (nx, ny).
+    """
+    return (POSTERIOR_PRIOR_DENSITY * bkg_map.pixel_area).decompose().value
 
 # Neighbourhood of the moving average applied to the posterior
 # background model written out by write_maps(): pixels whose centers,
@@ -422,7 +448,7 @@ class BkgMakerBase:
         return maps
 
     @staticmethod
-    def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=POSTERIOR_PRIOR_STRENGTH):
+    def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=None):
         """
         Save diagnostic plot images for a single background map: the
         observed rate map (CameraImage.plot()) for every energy bin,
@@ -446,11 +472,14 @@ class BkgMakerBase:
             model_counts attribute, used as the posterior_counts()
             prior. If None (default), only the plain rate map is
             saved.
-        prior_strength : float
+        prior_strength : float or numpy.ndarray, optional
             Prior weight passed to plot_fit_check() /
             plot_fit_spectrum() (see CameraImage.posterior_counts()).
-            Defaults to POSTERIOR_PRIOR_STRENGTH.
+            Defaults to posterior_prior_strength(bkg_map).
         """
+        if prior_strength is None:
+            prior_strength = posterior_prior_strength(bkg_map)
+
         n_ebins = len(bkg_map.energy_edges) - 1
 
         for i in range(n_ebins):
@@ -503,7 +532,8 @@ class BkgMakerBase:
         each map's observed counts, and used as the prior for a
         bin-by-bin Bayesian update against the observed counts (see
         CameraImage.posterior_counts(), with prior weight
-        POSTERIOR_PRIOR_STRENGTH). The resulting posterior rate is
+        POSTERIOR_PRIOR_DENSITY per unit solid angle, see
+        posterior_prior_strength()). The resulting posterior rate is
         what gets written out as the BKG column. If the fit does not
         converge, the map falls back to the raw counts-based rate
         (CameraImage.differential_rate()) and a warning is printed.
@@ -570,7 +600,7 @@ class BkgMakerBase:
 
             if fit_result is not None:
                 dnde = bkg_map.smoothed_posterior_differential_rate(
-                    fit_result, prior_strength=POSTERIOR_PRIOR_STRENGTH,
+                    fit_result, prior_strength=posterior_prior_strength(bkg_map),
                     max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST
                 )
 
