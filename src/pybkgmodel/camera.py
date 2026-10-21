@@ -194,77 +194,89 @@ def low_energy_cutoff(e, eth, s):
     return np.exp(-np.power(eth/e, s))
 
 
-def core_fraction(e, w0, delta_w, e0):
-    """
-    Energy-dependent fraction of the camera_response() spatial
-    distribution's weight in the Gaussian core,
-
-        w(e) = sigmoid(logit(w0) + delta_w*log(e/e0))
-
-    (see camera_response()).
-
-    Parameters
-    ----------
-    e: array_like
-        Energy.
-    w0: array_like
-        Core fraction at e = e0 (0 < w0 < 1).
-    delta_w: array_like
-        Logistic energy dependence of the core fraction.
-    e0: array_like
-        Reference energy, in the same unit as e.
-
-    Returns
-    -------
-    w: array_like
-        Core fraction at e.
-    """
-    w_logit0 = np.log(w0 / (1 - w0))
-    return 1 / (1 + np.exp(-(w_logit0 + delta_w*np.log(e/e0))))
-
-
 # Names of the camera_response() fit parameters, in the order expected
 # by camera_response() and CameraImage.fit_camera_response(), and of
 # result.x returned by the latter (see camera_response_params()).
 CAMERA_RESPONSE_PARAM_NAMES = (
-    'sigma_core_lo', 'sigma_core_hi', 'e_core_lo', 'e_core_hi', 'x0_core', 'y0_core',
-    'sigma_tail', 'p_tail', 'ecc_tail', 'phi_tail',
-    'w0', 'delta_w',
-    'norm', 'e0', 'alpha', 'beta',
+    'sigma_lo', 'sigma_hi', 'e_lo', 'e_hi',
+    'x0', 'y0', 'p_lo', 'p_hi', 'ecc_lo', 'ecc_hi', 'phi',
+    'norm', 'e_pivot', 'alpha', 'beta',
 )
 
 
-def core_width(e, sigma_lo, sigma_hi, e_lo, e_hi):
+def _log_energy_fraction(e, e_lo, e_hi, clip):
     """
-    Energy-dependent width of the Gaussian core of camera_response():
-    a power law in energy through sigma_lo at e_lo and sigma_hi at e_hi,
+    Position of e between e_lo (0) and e_hi (1) in log(e), optionally
+    clipped to [0, 1]. 0 at all energies if e_lo == e_hi.
+    """
+    span = np.log(e_hi / e_lo)
+    if span == 0:
+        return np.zeros_like(e)
 
-        sigma(e) = sigma_lo * (sigma_hi/sigma_lo)**(log(e/e_lo) / log(e_hi/e_lo))
+    t = np.log(e / e_lo) / span
+    if clip:
+        t = np.clip(t, 0, 1)
 
-    Being monotonic, it stays between sigma_lo and sigma_hi for all
-    energies between e_lo and e_hi, so bounding both bounds the width
-    over that whole range. If e_lo == e_hi, the width is sigma_lo at
-    all energies.
+    return t
+
+
+def energy_power_law(e, v_lo, v_hi, e_lo, e_hi, clip=False):
+    """
+    Positive quantity of the camera_response() spatial shape varying
+    with energy as a power law through v_lo at e_lo and v_hi at e_hi,
+
+        v(e) = v_lo * (v_hi/v_lo)**(log(e/e_lo) / log(e_hi/e_lo))
+
+    Being monotonic, it stays between v_lo and v_hi for all energies
+    between e_lo and e_hi, so bounding both bounds it over that whole
+    range. If e_lo == e_hi, it is v_lo at all energies.
 
     Parameters
     ----------
     e: array_like
         Energy.
-    sigma_lo, sigma_hi: array_like
-        Widths at e_lo and e_hi.
+    v_lo, v_hi: array_like
+        Values at e_lo and e_hi.
     e_lo, e_hi: array_like
         Reference energies, in the same unit as e.
+    clip: bool
+        If True, hold the value constant (v_lo or v_hi) outside of
+        [e_lo, e_hi] instead of extrapolating the power law.
 
     Returns
     -------
-    sigma: array_like
-        Core width at e.
+    v: array_like
+        Value at e.
     """
-    span = np.log(e_hi / e_lo)
-    if span == 0:
-        return sigma_lo * np.ones_like(e)
+    return v_lo * np.power(v_hi / v_lo, _log_energy_fraction(e, e_lo, e_hi, clip))
 
-    return sigma_lo * np.power(sigma_hi / sigma_lo, np.log(e / e_lo) / span)
+
+def energy_log_linear(e, v_lo, v_hi, e_lo, e_hi, clip=False):
+    """
+    Quantity of the camera_response() spatial shape varying linearly
+    in log(e) from v_lo at e_lo to v_hi at e_hi. Unlike
+    energy_power_law(), v_lo and v_hi may be 0 or negative. Being
+    monotonic, it stays between v_lo and v_hi for all energies between
+    e_lo and e_hi. If e_lo == e_hi, it is v_lo at all energies.
+
+    Parameters
+    ----------
+    e: array_like
+        Energy.
+    v_lo, v_hi: array_like
+        Values at e_lo and e_hi.
+    e_lo, e_hi: array_like
+        Reference energies, in the same unit as e.
+    clip: bool
+        If True, hold the value constant (v_lo or v_hi) outside of
+        [e_lo, e_hi] instead of extrapolating.
+
+    Returns
+    -------
+    v: array_like
+        Value at e.
+    """
+    return v_lo + (v_hi - v_lo) * _log_energy_fraction(e, e_lo, e_hi, clip)
 
 
 def camera_response_params(result):
@@ -280,51 +292,37 @@ def camera_response_params(result):
     -------
     params: dict
         Parameter values, keyed by CAMERA_RESPONSE_PARAM_NAMES. Widths
-        and centers are in degrees, energies (e_core_lo, e_core_hi,
-        e0) in TeV.
+        and centers are in degrees, energies (e_lo, e_hi, e_pivot) in
+        TeV.
     """
     return dict(zip(CAMERA_RESPONSE_PARAM_NAMES, result.x))
 
 
 def camera_response(x, y, e,
-                     sigma_core_lo, sigma_core_hi, e_core_lo, e_core_hi, x0_core, y0_core,
-                     sigma_tail, p_tail, ecc_tail, phi_tail,
-                     w0, delta_w,
-                     norm, e0, alpha, beta):
+                     sigma_lo, sigma_hi, e_lo, e_hi,
+                     x0, y0, p_lo, p_hi, ecc_lo, ecc_hi, phi,
+                     norm, e_pivot, alpha, beta):
     """
     Camera background response model, defined as the product of:
-    1. a spatial (x, y) distribution, itself the sum of two components:
-       a. a circularly symmetric 2D Gaussian "core", and
-       b. an elliptical 2D super-Gaussian "tail" (see super_gaussian()),
-          whose exponent p_tail >= 1 lets it range from a Gaussian
-          (p_tail = 1) to a flat-topped plateau with a steep edge,
-       mixed as w*core + (1-w)*tail, with each individually normalized
-       to integrate to 1 over the camera plane, so w is the fraction
-       of the spatial distribution's total (normalized) weight
-       contributed by the core (see below for its energy dependence).
+    1. a spatial (x, y) distribution: a single elliptical 2D
+       super-Gaussian (see super_gaussian()), normalized to integrate
+       to 1 over the camera plane, whose width changes with energy,
     2. a linear function of y (currently fixed to a constant 1, see
        linear() -- both its slope and intercept are fixed for now, as
        this was found to make the fit more stable),
     3. a log-parabola function of e.
 
-    The core is centered at (x0_core, y0_core), a free fit parameter;
-    the tail is fixed at the camera center (0, 0). The core's width
-    varies with energy as a power law through sigma_core_lo at
-    e_core_lo and sigma_core_hi at e_core_hi (see core_width()). Its
-    center (x0_core, y0_core) has no energy dependence.
-
-    The tail's width (sigma_tail), exponent (p_tail) and eccentricity
-    (ecc_tail) have no energy dependence.
-
-    The core fraction w is bounded to (0, 1) and uses a logistic
-    (sigmoid) construction of log(e/e0) to keep it there at all
-    energies (a plain linear or power-law term could not, since it is
-    bounded on both sides),
-
-        w(e) = sigmoid(logit(w0) + delta_w*log(e/e0))
-
-    so w(e0) = w0 exactly, and delta_w = 0 recovers an energy-independent
-    core/tail mix.
+    The spatial distribution is centered at (x0, y0). Its width, its
+    exponent p and its eccentricity ecc vary with energy, each given
+    by its values at e_lo and e_hi:
+    - the width sigma as a power law (see energy_power_law()),
+      extrapolated outside of [e_lo, e_hi],
+    - p as a power law, held constant outside of [e_lo, e_hi],
+    - ecc linearly in log(e) (see energy_log_linear()), held constant
+      outside of [e_lo, e_hi], so it stays within its bounds (ecc < 1).
+    Its center and orientation phi have no energy dependence. p = 1
+    is a Gaussian; p < 1 gives a more peaked shape with heavier wings,
+    p > 1 a flat top with a steep edge.
 
     Parameters
     ----------
@@ -332,41 +330,34 @@ def camera_response(x, y, e,
         Camera plane coordinates.
     e: array_like
         Energy.
-    sigma_core_lo, sigma_core_hi, e_core_lo, e_core_hi: array_like
-        Width of the Gaussian core (a super_gaussian() with p = 1,
-        ecc = 0, phi = 0) at the energies e_core_lo and e_core_hi,
-        see core_width().
-    x0_core, y0_core: array_like
-        (Energy-independent) center of the Gaussian core.
-    sigma_tail, p_tail, ecc_tail, phi_tail: array_like
-        Parameters of the elliptical super-Gaussian tail (see
-        super_gaussian(), with p = p_tail), fixed at the camera center
-        (0, 0).
-    w0, delta_w: array_like
-        Fraction (0 < w < 1) of the spatial distribution's weight in
-        the core, vs. (1 - w) in the tail (see above). w0 is its value
-        at e = e0, and delta_w its logistic energy dependence (see
-        above).
-    norm, e0, alpha, beta: array_like
-        Parameters of the log-parabola function of e, see log_parabola().
+    sigma_lo, sigma_hi, e_lo, e_hi: array_like
+        Width of the spatial distribution at the energies e_lo and
+        e_hi, see energy_power_law().
+    x0, y0: array_like
+        Center of the spatial distribution.
+    p_lo, p_hi, ecc_lo, ecc_hi: array_like
+        Exponent and eccentricity of the spatial distribution (see
+        super_gaussian()) at the energies e_lo and e_hi.
+    phi: array_like
+        Orientation of the spatial distribution, see super_gaussian().
+    norm, e_pivot, alpha, beta: array_like
+        Parameters of the log-parabola function of e (e_pivot being
+        its reference energy e0), see log_parabola().
 
     Returns
     -------
     val: array_like
         Camera response value.
     """
-    sigma_core = core_width(e, sigma_core_lo, sigma_core_hi, e_core_lo, e_core_hi)
-
-    w = core_fraction(e, w0, delta_w, e0)
-
-    core = super_gaussian(x, y, sigma_core, p=1.0, x0=x0_core, y0=y0_core)
-    tail = super_gaussian(x, y, sigma_tail, p=p_tail, ecc=ecc_tail, phi=phi_tail)
-    spatial = w*core + (1 - w)*tail
+    sigma = energy_power_law(e, sigma_lo, sigma_hi, e_lo, e_hi)
+    p = energy_power_law(e, p_lo, p_hi, e_lo, e_hi, clip=True)
+    ecc = energy_log_linear(e, ecc_lo, ecc_hi, e_lo, e_hi, clip=True)
+    spatial = super_gaussian(x, y, sigma, p=p, ecc=ecc, phi=phi, x0=x0, y0=y0)
 
     return (
         spatial
         * linear(y, a=0.0)
-        * log_parabola(e, norm, e0, alpha, beta)
+        * log_parabola(e, norm, e_pivot, alpha, beta)
     )
 
 
@@ -848,7 +839,7 @@ f"""{type(self).__name__} instance
 
         return dnde, result
 
-    def fit_energy_range(self):
+    def fit_energy_range(self, min_counts=100):
         """
         Energy bins included in fit_camera_response(): the bin with the
         highest total count (in the unmasked pixels) and all bins above
@@ -856,14 +847,24 @@ f"""{type(self).__name__} instance
         the energy-dependent fit parameters and would otherwise just
         add spurious -model_counts terms to the fit statistic.
 
+        Parameters
+        ----------
+        min_counts: float
+            Minimal total count (in the unmasked pixels) of an energy
+            bin for it to count as constraining the spatial shape,
+            see e_lo, e_hi below. Defaults to 100.
+
         Returns
         -------
         in_range: numpy.ndarray of bool
             Whether each energy bin is included in the fit.
         e_lo, e_hi: float
             Centers (in TeV) of the lowest and highest included energy
-            bins with any counts, i.e. the energy range actually
-            constrained by the data.
+            bins holding at least min_counts counts, i.e. the energy
+            range where the data actually constrain the spatial shape
+            (a few stray events at the highest energies do not extend
+            it). If no included bin has that many counts, both are the
+            peak bin's center.
         """
         mask = np.broadcast_to(self.mask, self.raw_counts.shape)
         bin_totals = (self.raw_counts * mask).sum(axis=(1, 2))
@@ -871,7 +872,7 @@ f"""{type(self).__name__} instance
         in_range = np.arange(len(bin_totals)) >= peak_bin
 
         e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(u.TeV)
-        filled = np.nonzero(in_range & (bin_totals > 0))[0]
+        filled = np.nonzero(in_range & (bin_totals >= min_counts))[0]
         if filled.size == 0:
             filled = np.array([peak_bin])
 
@@ -891,10 +892,9 @@ f"""{type(self).__name__} instance
         ----------
         p0: array_like
             Initial guess for the camera_response() fit parameters
-            (sigma_core_lo, sigma_core_hi, e_core_lo, e_core_hi,
-            x0_core, y0_core, sigma_tail, p_tail, ecc_tail, phi_tail,
-            w0, delta_w, norm, e0, alpha, beta), see
-            CAMERA_RESPONSE_PARAM_NAMES.
+            (sigma_lo, sigma_hi, e_lo, e_hi, x0, y0, p_lo, p_hi,
+            ecc_lo, ecc_hi, phi,
+            norm, e_pivot, alpha, beta), see CAMERA_RESPONSE_PARAM_NAMES.
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
             in degrees and TeV respectively.
@@ -1131,7 +1131,7 @@ f"""{type(self).__name__} instance
         """
         Bayesian posterior rate (see posterior_rate()), smoothed by a
         moving average over polar neighbourhoods around the fitted
-        Gaussian core peak (x0_core, y0_core) of camera_response(),
+        center (x0, y0) of camera_response(),
         see polar_moving_average().
 
         The plain average would flatten the steep radial profile of
@@ -1158,10 +1158,10 @@ f"""{type(self).__name__} instance
         prior_strength: float or array_like
             Prior weight, see posterior_counts().
         max_dphi: astropy.units.Quantity
-            Maximal azimuth difference, seen from the core peak, of
+            Maximal azimuth difference, seen from the model center, of
             the pixels averaged together. Defaults to 10 deg.
         max_dr: astropy.units.Quantity
-            Maximal difference in radial distance from the core peak
+            Maximal difference in radial distance from the model center
             of the pixels averaged together, counted as negative across
             the peak (see polar_neighbourhood()). Defaults to 0.25 deg.
         max_dist: astropy.units.Quantity
@@ -1175,7 +1175,7 @@ f"""{type(self).__name__} instance
             Smoothed posterior rate, of the same shape as
             CameraImage.counts.
         """
-        x0, y0 = self._core_peak(result)
+        x0, y0 = self._model_center(result)
         x = (self.xedges[1:] + self.xedges[:-1]) / 2
         y = (self.yedges[1:] + self.yedges[:-1]) / 2
 
@@ -1240,10 +1240,10 @@ f"""{type(self).__name__} instance
         return rate / self.pixel_area * self._int2diff(index)[:, None, None]
 
     @staticmethod
-    def _core_peak(result):
-        """Fitted Gaussian core peak (x0_core, y0_core) of camera_response()."""
+    def _model_center(result):
+        """Fitted center (x0, y0) of the camera_response() spatial distribution."""
         params = camera_response_params(result)
-        return params['x0_core'] * u.deg, params['y0_core'] * u.deg
+        return params['x0'] * u.deg, params['y0'] * u.deg
 
     def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg, pixels=None, energy_bin_id=None, ax_unit='deg'):
         """
@@ -1253,34 +1253,32 @@ f"""{type(self).__name__} instance
         and the polar (max_dphi, max_dr) and distance (max_dist)
         limits are drawn as dashed lines around it.
 
-        The fitted camera_response() spatial components are overlaid:
-        the Gaussian core as its 1 sigma circle (at e = e0, where its
-        width is core_width() at e0), and the elliptical super-Gaussian
-        tail as its sigma ellipse (semi-axes sigma_tail / sqrt(1 -
-        ecc_tail) and sigma_tail * sqrt(1 - ecc_tail), rotated by
-        phi_tail).
+        The fitted camera_response() spatial distribution is overlaid
+        as its sigma ellipse (semi-axes sigma / sqrt(1 - ecc) and
+        sigma * sqrt(1 - ecc), rotated by phi, see super_gaussian()),
+        at both ends e_lo and e_hi of the fitted energy range.
 
         If energy_bin_id is given, the observed counts of that energy
         bin are shown underneath (masked pixels blank), the averaged
         pixels are outlined instead of filled so the counts stay
-        visible, and the Gaussian core circle is drawn at the energy
-        bin's center (see core_width()).
+        visible, and the sigma ellipse is drawn at the energy bin's
+        center only (see camera_response()).
 
         Parameters
         ----------
         result: scipy.optimize.OptimizeResult
-            Result of fit_camera_response(), giving the core peak.
+            Result of fit_camera_response(), giving the model center.
         max_dphi, max_dr, max_dist: astropy.units.Quantity
             Neighbourhood limits, see smoothed_posterior_rate().
         pixels: list of tuple of int, optional
             (i, j) indices of the example pixels. Defaults to two
-            pixels: the one closest to the core peak, and one far from
+            pixels: the one closest to the model center, and one far from
             it (at 70% of the smaller half-extent of the camera, toward
             the upper right).
         energy_bin_id: int, optional
             Energy bin whose counts are shown underneath. If None
-            (default), no counts are shown and the Gaussian core is
-            drawn at e = e0.
+            (default), no counts are shown and the sigma ellipse is
+            drawn at e_lo and e_hi.
         ax_unit: str
             Unit to use for the x/y axes.
 
@@ -1293,7 +1291,7 @@ f"""{type(self).__name__} instance
         from matplotlib.colors import ListedColormap
         from matplotlib.patches import Circle, Ellipse, Rectangle, Wedge
 
-        x0, y0 = self._core_peak(result)
+        x0, y0 = self._model_center(result)
         x = (self.xedges[1:] + self.xedges[:-1]) / 2
         y = (self.yedges[1:] + self.yedges[:-1]) / 2
         xx, yy = np.meshgrid(x.to_value(u.deg), y.to_value(u.deg), indexing='ij')
@@ -1312,7 +1310,7 @@ f"""{type(self).__name__} instance
         # black.
         colors = ['#2a78d6', '#eb6834']
         on_counts = energy_bin_id is not None
-        core_color, tail_color = ('#1baf7a', '#e87ba4') if on_counts else ('black', 'black')
+        shape_color = '#1baf7a' if on_counts else 'black'
 
         to_unit = lambda q: q.to_value(ax_unit)
         xedges = to_unit(self.xedges)
@@ -1393,37 +1391,33 @@ f"""{type(self).__name__} instance
 
         ax.plot(
             to_unit(x0), to_unit(y0), '+', color='black', markersize=12, markeredgewidth=2,
-            path_effects=[patheffects.withStroke(linewidth=4, foreground='white')], label='Gaussian core peak'
+            path_effects=[patheffects.withStroke(linewidth=4, foreground='white')], label='Model center'
         )
 
-        # Fitted spatial components.
+        # Fitted spatial distribution, as its sigma ellipse.
         params = camera_response_params(result)
-        sigma_tail, p_tail = params['sigma_tail'], params['p_tail']
-        ecc_tail, phi_tail = params['ecc_tail'], params['phi_tail']
-        e0 = params['e0'] * u.TeV
         if on_counts:
             e = np.sqrt(self.energy_edges[energy_bin_id] * self.energy_edges[energy_bin_id + 1]).to(u.TeV)
+            ellipses = [(e, '-')]
         else:
-            e = e0
-        sigma_core = core_width(
-            e.to_value(u.TeV), params['sigma_core_lo'], params['sigma_core_hi'],
-            params['e_core_lo'], params['e_core_hi']
-        ) * u.deg
-        ax.add_patch(Circle(
-            (to_unit(x0), to_unit(y0)), to_unit(sigma_core),
-            fill=False, edgecolor=core_color, linewidth=1.8
-        ))
-        ax.plot([], [], '-', color=core_color,
-                label=f'Gaussian core 1 sigma at {e:.2f} (sigma = {sigma_core:.2f})')
+            ellipses = [(params['e_lo'] * u.TeV, '-'), (params['e_hi'] * u.TeV, '-.')]
 
-        semi_major = sigma_tail / np.sqrt(1 - ecc_tail) * u.deg
-        semi_minor = sigma_tail * np.sqrt(1 - ecc_tail) * u.deg
-        ax.add_patch(Ellipse(
-            (0, 0), 2*to_unit(semi_major), 2*to_unit(semi_minor), angle=np.degrees(phi_tail),
-            fill=False, edgecolor=tail_color, linestyle='-.', linewidth=1.8
-        ))
-        ax.plot([], [], '-.', color=tail_color,
-                label=f'Tail sigma ellipse ({semi_major:.2f} x {semi_minor:.2f}, p = {p_tail:.2f})')
+        for e, linestyle in ellipses:
+            e_tev = e.to_value(u.TeV)
+            e_range = (params['e_lo'], params['e_hi'])
+            sigma = energy_power_law(e_tev, params['sigma_lo'], params['sigma_hi'], *e_range)
+            p = energy_power_law(e_tev, params['p_lo'], params['p_hi'], *e_range, clip=True)
+            ecc = energy_log_linear(e_tev, params['ecc_lo'], params['ecc_hi'], *e_range, clip=True)
+            semi_major = sigma / np.sqrt(1 - ecc) * u.deg
+            semi_minor = sigma * np.sqrt(1 - ecc) * u.deg
+            ax.add_patch(Ellipse(
+                (to_unit(x0), to_unit(y0)), 2*to_unit(semi_major), 2*to_unit(semi_minor),
+                angle=np.degrees(params['phi']),
+                fill=False, edgecolor=shape_color, linestyle=linestyle, linewidth=1.8
+            ))
+            ax.plot([], [], linestyle, color=shape_color,
+                    label=f'Sigma ellipse at {e:.2f} ({semi_major:.2f} x {semi_minor:.2f}, p = {p:.2f})')
+
         ax.plot([], [], '--', color='gray', label=f'|dphi| <= {max_dphi.to_value(u.deg):g} deg, |dr| <= {max_dr.to_value(u.deg):g} deg')
         ax.plot([], [], ':', color='gray', label=f'distance <= {max_dist.to_value(u.deg):g} deg')
 
@@ -1674,53 +1668,6 @@ f"""{type(self).__name__} instance
         fig.tight_layout()
 
         return fig, (ax_spec, ax_pull)
-
-    def plot_core_fraction(self, result, e_unit='TeV'):
-        """
-        Plot the fitted Gaussian core fraction w(e) of camera_response()
-        (see core_fraction()) as a function of energy, with the tail
-        fraction 1 - w(e) for reference. The curves span the energy
-        range of this image; markers show the energy bin centers, and a
-        vertical line the fitted reference energy e0, where w = w0.
-
-        Parameters
-        ----------
-        result: scipy.optimize.OptimizeResult
-            Result of fit_camera_response().
-        e_unit: str
-            Unit to use for the energy axis.
-
-        Returns
-        -------
-        fig, ax: matplotlib figure and axes
-        """
-        params = camera_response_params(result)
-        w0, delta_w, e0 = params['w0'], params['delta_w'], params['e0']
-
-        e_fine = np.geomspace(self.energy_edges[0], self.energy_edges[-1], 200)
-        e_center = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1])
-
-        w_fine = core_fraction(e_fine.to_value(u.TeV), w0, delta_w, e0)
-        w_center = core_fraction(e_center.to_value(u.TeV), w0, delta_w, e0)
-
-        fig, ax = pyplot.subplots(figsize=(6, 4))
-
-        ax.plot(e_fine.to_value(e_unit), w_fine, '-', color='C0', label='Core (Gaussian) $w$')
-        ax.plot(e_center.to_value(e_unit), w_center, 'o', color='C0')
-        ax.plot(e_fine.to_value(e_unit), 1 - w_fine, '--', color='C1', label='Tail (elliptical Gaussian) $1 - w$')
-        ax.plot(e_center.to_value(e_unit), 1 - w_center, 'o', color='C1', mfc='none')
-        ax.axvline((e0 * u.TeV).to_value(e_unit), color='gray', ls=':', label=f'$e_0$ ($w_0$ = {w0:.3g})')
-
-        ax.set_xscale('log')
-        ax.set_ylim(0, 1)
-        ax.set_xlabel(f'Energy [{e_unit}]')
-        ax.set_ylabel('Fraction')
-        ax.set_title(rf'$\delta_w$ = {delta_w:.3g}')
-        ax.legend()
-
-        fig.tight_layout()
-
-        return fig, ax
 
     def mask_half(self, pointer):
         """Excludes the half of the camera containing the sources.

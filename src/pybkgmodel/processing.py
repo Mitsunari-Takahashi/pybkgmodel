@@ -1,7 +1,6 @@
 from functools import reduce
 import glob
 import inspect
-import itertools
 from operator import getitem
 import os
 import sys
@@ -24,18 +23,65 @@ from pybkgmodel.model import (WobbleMap,
 from pybkgmodel.camera import RectangularCameraImage, CAMERA_RESPONSE_PARAM_NAMES, super_gaussian
 
 # Order of the camera_response() fit parameters, as expected by
-# CameraImage.fit_camera_response() / fitted_differential_rate().
-# sigma_core_lo, sigma_core_hi, e_core_lo, e_core_hi, x0_core, y0_core:
-#   Gaussian core (camera acceptance shape's central component): its
-#   width at the two ends of the fitted energy range, and its
-#   (energy-independent) center.
-# sigma_tail, p_tail, ecc_tail, phi_tail: elliptical super-Gaussian
-#   tail (extended halo component), fixed at the camera center.
-# w0, delta_w: fraction of the spatial distribution's weight in the
-#   core, and its energy dependence.
+# CameraImage.fit_camera_response() / fitted_differential_rate(), see
+# pybkgmodel.camera.CAMERA_RESPONSE_PARAM_NAMES.
+# sigma_lo, sigma_hi, e_lo, e_hi: width of the elliptical
+#   super-Gaussian acceptance shape at the two ends of the fitted
+#   energy range (power law in between).
+# x0, y0: its (energy-independent) center.
+# p_lo, p_hi, ecc_lo, ecc_hi: its exponent and eccentricity at the two
+#   ends of the fitted energy range.
+# phi: its (energy-independent) orientation.
 # (the linear function of y has both its slope and intercept fixed,
 #   i.e. no y-dependence, for now; see camera_response())
-# norm, e0, alpha, beta: log-parabola function of energy.
+# norm, e_pivot, alpha, beta: log-parabola function of energy.
+def counts_ellipticity(bkg_map, in_range):
+    """
+    Rough eccentricity and orientation of the observed counts
+    distribution, from its second moments (summed over the given
+    energy bins, unmasked pixels only), in the convention of
+    pybkgmodel.camera.super_gaussian(): the major axis is at the angle
+    phi from the x axis, and the axis ratio is 1 / (1 - ecc). The
+    camera edges and masked regions bias the estimate, so it is only
+    meant as a starting point for the fit.
+
+    Parameters
+    ----------
+    bkg_map: pybkgmodel.camera.CameraImage
+        Background map.
+    in_range: numpy.ndarray of bool
+        Energy bins to use.
+
+    Returns
+    -------
+    ecc: float
+        Eccentricity, clipped to [0.02, 0.8] (kept off the ecc = 0
+        bound, where the orientation is undefined).
+    phi: float
+        Orientation in radians, in (-pi/2, pi/2].
+    """
+    counts = (bkg_map.raw_counts[in_range] * bkg_map.mask).sum(axis=0)
+    x = ((bkg_map.xedges[1:] + bkg_map.xedges[:-1]) / 2).to_value(u.deg)
+    y = ((bkg_map.yedges[1:] + bkg_map.yedges[:-1]) / 2).to_value(u.deg)
+    xx, yy = np.meshgrid(x, y, indexing='ij')
+
+    total = counts.sum()
+    if total <= 0:
+        return 0.1, 0.0
+
+    dx = xx - (counts * xx).sum() / total
+    dy = yy - (counts * yy).sum() / total
+    cxx = (counts * dx**2).sum() / total
+    cyy = (counts * dy**2).sum() / total
+    cxy = (counts * dx * dy).sum() / total
+
+    phi = 0.5 * np.arctan2(2 * cxy, cxx - cyy)
+    eigenvalues = np.linalg.eigvalsh([[cxx, cxy], [cxy, cyy]])
+    ecc = 1 - np.sqrt(eigenvalues[0] / eigenvalues[1]) if eigenvalues[1] > 0 else 0.1
+
+    return float(np.clip(ecc, 0.02, 0.8)), float(phi)
+
+
 def default_camera_response_guess(bkg_map):
     """
     Generic initial guess and bounds for CameraImage.fit_camera_response(),
@@ -58,144 +104,69 @@ def default_camera_response_guess(bkg_map):
     x_min, x_max = bkg_map.xedges.min().to_value(u.deg), bkg_map.xedges.max().to_value(u.deg)
     y_min, y_max = bkg_map.yedges.min().to_value(u.deg), bkg_map.yedges.max().to_value(u.deg)
     x_range = x_max - x_min
-    e0_guess = 1.0
 
-    # The core and tail widths are kept in separate ranges, split at a
-    # quarter of the FOV extent: the core is the narrower component,
-    # the tail the wider one. Without this, the fit can swap the two
-    # roles (a Gaussian wider than the FOV acting as a flat pedestal,
-    # and a narrow tail forming the peak), which leaves the
-    # core center (x0_core, y0_core) unconstrained by the data.
-    sigma_split = x_range / 4
-
-    # The core width is given at the two ends of the energy range
+    # The width is given at the two ends of the energy range
     # constrained by the data (fixed, see fit_energy_range()), with a
-    # power law in between (see core_width()). Bounding both widths
-    # below sigma_split keeps the core narrower than the tail over that
-    # whole range, while letting its width change with energy.
-    _, e_core_lo0, e_core_hi0 = bkg_map.fit_energy_range()
-    sigma_core_lo0 = sigma_core_hi0 = sigma_split / 2
-    x0_core0, y0_core0 = 0.0, 0.0
+    # power law in between (see energy_power_law()). The exponent p and
+    # the eccentricity are given the same way (see camera_response()).
+    in_range, e_lo0, e_hi0 = bkg_map.fit_energy_range()
+    sigma_lo0 = sigma_hi0 = x_range / 4
+    x00, y00 = 0.0, 0.0
 
-    # The tail exponent p_tail >= 1 ranges from a Gaussian (1) to a
-    # flat-topped plateau with a steep edge, as the camera acceptance
-    # often shows at high energies.
-    sigma_tail0 = x_range / 2
-    p_tail0 = 1.5
-    ecc_tail0 = 0.1
-    phi_tail0 = 0.0
+    # p = 1 is a Gaussian; p < 1 gives a more peaked shape with heavier
+    # wings, p > 1 a flat top with a steep edge.
+    p0_ = 1.0
 
-    # w0 (the core fraction at e = e0) is fixed to 0.5, which makes e0
-    # the energy at which the core and tail contribute equally (see
-    # core_fraction()). This removes the degeneracy of the reference
-    # energy e0, which could otherwise be traded against w0, norm,
-    # alpha and beta without changing the model.
-    w0 = 0.5
-    delta_w0 = -1.0
+    # Eccentricity and orientation start from the second moments of the
+    # observed counts. Starting from an arbitrary orientation instead,
+    # the fit tends to drive the eccentricity to 0 (its best value for a
+    # wrong orientation), where the orientation no longer affects the
+    # model, and gets stuck there.
+    ecc0, phi0 = counts_ellipticity(bkg_map, in_range)
 
+    # The log-parabola pivot energy is fixed: it is only a reference
+    # point, which could otherwise be traded against norm, alpha and
+    # beta without changing the model.
+    e_pivot = 1.0
     alpha0 = 1.7
     beta0 = 0.1
 
     # Rough normalization guess, so that the model peak count matches
     # the observed peak count for the initial guess of the shape
-    # parameters above (both components centered at the origin). The
-    # linear(y) function's intercept is fixed to 1 inside
-    # camera_response() (see linear()), so it does not enter here.
-    core_peak = super_gaussian(0.0, 0.0, sigma_core_lo0, p=1.0)
-    tail_peak = super_gaussian(0.0, 0.0, sigma_tail0, p=p_tail0)
-    spatial_peak = w0*core_peak + (1 - w0)*tail_peak
+    # parameters above. The linear(y) function's intercept is fixed to
+    # 1 inside camera_response() (see linear()), so it does not enter
+    # here.
+    spatial_peak = super_gaussian(0.0, 0.0, sigma_lo0, p=p0_)
     exposure0 = bkg_map.raw_exposure[bkg_map.mask].mean().to_value(u.s)
     counts_peak = bkg_map.raw_counts.max()
     norm0 = max(counts_peak / max(spatial_peak * exposure0, 1e-30), 1e-10)
 
     p0 = [
-        sigma_core_lo0, sigma_core_hi0, e_core_lo0, e_core_hi0, x0_core0, y0_core0,
-        sigma_tail0, p_tail0, ecc_tail0, phi_tail0,
-        w0, delta_w0,
-        norm0, e0_guess, alpha0, beta0,
+        sigma_lo0, sigma_hi0, e_lo0, e_hi0,
+        x00, y00, p0_, p0_, ecc0, ecc0, phi0,
+        norm0, e_pivot, alpha0, beta0,
     ]
 
     bounds = [
-        (x_range / 100, sigma_split),      # sigma_core_lo (narrower than the tail)
-        (x_range / 100, sigma_split),      # sigma_core_hi (narrower than the tail)
-        (e_core_lo0, e_core_lo0),          # e_core_lo (fixed, see above)
-        (e_core_hi0, e_core_hi0),          # e_core_hi (fixed, see above)
-        (x_min, x_max),                    # x0_core
-        (y_min, y_max),                    # y0_core
-        (sigma_split, x_range),            # sigma_tail (wider than the core, capped
-                                            # at the FOV extent: wider halos aren't
-                                            # constrained by the data)
-        (1.0, 5.0),                        # p_tail
-        (0.0, 0.9),                        # ecc_tail
-        (-np.pi / 2, np.pi / 2),           # phi_tail
-        (w0, w0),                          # w0 (fixed, see above)
-        (-10.0, -0.001),                       # delta_w
+        (x_range / 100, x_range),          # sigma_lo (capped at the FOV extent:
+        (x_range / 100, x_range),          # sigma_hi  wider shapes aren't
+                                            #           constrained by the data)
+        (e_lo0, e_lo0),                    # e_lo (fixed, see above)
+        (e_hi0, e_hi0),                    # e_hi (fixed, see above)
+        (x_min, x_max),                    # x0
+        (y_min, y_max),                    # y0
+        (0.5, 5.0),                        # p_lo
+        (0.5, 5.0),                        # p_hi
+        (0.0, 0.9),                        # ecc_lo
+        (0.0, 0.9),                        # ecc_hi
+        (-np.pi / 2, np.pi / 2),           # phi
         (norm0 / 1e3, norm0 * 1e3),        # norm
-        (0.9, 10.0),                       # e0 (core/tail crossover energy, TeV)
-        (0.0, 3.0),                      # alpha
+        (e_pivot, e_pivot),                # e_pivot (fixed, see above)
+        (0.0, 3.0),                        # alpha
         (-1.0, 1.0),                       # beta
     ]
 
     return p0, bounds
-
-# Starting values of the core/tail crossover energy e0 (TeV) and of
-# the tail exponent p_tail tried by fit_camera_response_multistart():
-# the fit has several local minima (e.g. with the tail taking over the
-# core's role in part of the energy range), and which one a single
-# L-BFGS-B run ends in depends on its starting point.
-MULTISTART_E0 = (1.0, 3.0, 8.0)
-MULTISTART_P_TAIL = (1.5, 3.0)
-
-
-def fit_camera_response_multistart(bkg_map, p0, bounds):
-    """
-    Fit camera_response() to the background map with L-BFGS-B from
-    several starting points, varying e0 and p_tail over MULTISTART_E0
-    and MULTISTART_P_TAIL (clipped to their bounds), the other
-    parameters starting at p0. Returns the converged fit with the
-    lowest fit statistic.
-
-    Parameters
-    ----------
-    bkg_map: pybkgmodel.camera.CameraImage
-        Background map to be fit.
-    p0: list
-        Initial guess for the other fit parameters, see
-        default_camera_response_guess().
-    bounds: list of (min, max)
-        Bounds for the fit parameters.
-
-    Returns
-    -------
-    result: scipy.optimize.OptimizeResult or None
-        Best converged fit (see CameraImage.fit_camera_response()), or
-        None if no start converged to a finite fit statistic.
-    """
-    i_e0 = CAMERA_RESPONSE_PARAM_NAMES.index('e0')
-    i_p = CAMERA_RESPONSE_PARAM_NAMES.index('p_tail')
-
-    best = None
-    for e0, p_tail in itertools.product(MULTISTART_E0, MULTISTART_P_TAIL):
-        start = list(p0)
-        start[i_e0] = np.clip(e0, *bounds[i_e0])
-        start[i_p] = np.clip(p_tail, *bounds[i_p])
-
-        try:
-            # The default L-BFGS-B evaluation limit (15000) can be hit
-            # just before convergence, with the parameters already
-            # settled, so it is raised here.
-            result = bkg_map.fit_camera_response(
-                start, bounds=bounds, method='L-BFGS-B',
-                options=dict(maxfun=50000, maxiter=50000)
-            )
-        except Exception:  # pylint: disable=broad-except
-            continue
-
-        if result.success and np.isfinite(result.fun) and (best is None or result.fun < best.fun):
-            best = result
-
-    return best
-
 
 # Prior weight used to combine the camera_response() fit (as the
 # prior) with the observed counts (as the data) into the Bayesian
@@ -231,7 +202,7 @@ def posterior_prior_strength(bkg_map):
 
 # Neighbourhood of the moving average applied to the posterior
 # background model written out by write_maps(): pixels whose centers,
-# seen from the fitted Gaussian core peak, are within
+# seen from the fitted model center (x0, y0), are within
 # SMOOTHING_MAX_DPHI in azimuth and SMOOTHING_MAX_DR in radial
 # distance (counted as negative across the peak, see
 # pybkgmodel.camera.polar_neighbourhood()), or within
@@ -244,7 +215,7 @@ SMOOTHING_MAX_DR = 0.25 * u.deg
 # Pixels whose centers are within this distance of each other are
 # always averaged together, whatever their azimuth and radial distance.
 # This keeps the neighbourhood from shrinking to a thin sliver near the
-# core peak, which otherwise leaves a radial pattern there.
+# model center, which otherwise leaves a radial pattern there.
 SMOOTHING_MAX_DIST = 0.25 * u.deg
 
 # list of class attributes, which have a unit assigned
@@ -536,7 +507,7 @@ class BkgMakerBase:
         base_path : str
             Output path without extension. '_map_bin<i>.png',
             '_fit_check_bin<i>.png', '_counts_smoothing_bin<i>.png',
-            '_fit_spectrum.png', '_core_fraction.png' and
+            '_fit_spectrum.png' and
             '_smoothing_neighbourhood.png' are appended to it.
         result : scipy.optimize.OptimizeResult, optional
             Result of bkg_map.fit_camera_response(), must have a
@@ -580,10 +551,6 @@ class BkgMakerBase:
             fig.savefig(f"{base_path}_fit_spectrum.png")
             pyplot.close(fig)
 
-            fig, _ = bkg_map.plot_core_fraction(result)
-            fig.savefig(f"{base_path}_core_fraction.png")
-            pyplot.close(fig)
-
             fig, _ = bkg_map.plot_smoothing_neighbourhood(
                 result, max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST
             )
@@ -600,8 +567,7 @@ class BkgMakerBase:
 
         Prior to writing, a camera_response() model (see
         pybkgmodel.camera.CameraImage.fit_camera_response()) is fit to
-        each map's observed counts (from several starting points, see
-        fit_camera_response_multistart()), and used as the prior for a
+        each map's observed counts, and used as the prior for a
         bin-by-bin Bayesian update against the observed counts (see
         CameraImage.posterior_counts(), with prior weight
         POSTERIOR_PRIOR_DENSITY per unit solid angle, see
@@ -613,7 +579,7 @@ class BkgMakerBase:
         If the fit succeeded, the posterior is additionally smoothed
         before writing, by a moving average over the pixels within
         SMOOTHING_MAX_DPHI in azimuth and SMOOTHING_MAX_DR in radial
-        distance, seen from the fitted Gaussian core peak, or within
+        distance, seen from the fitted model center, or within
         SMOOTHING_MAX_DIST of the pixel itself, corrected
         with the fitted model shape and renormalized to the posterior
         total per energy bin (see CameraImage.smoothed_posterior_rate()).
@@ -635,19 +601,24 @@ class BkgMakerBase:
             p0, bounds = default_camera_response_guess(bkg_map)
 
             dnde = None
-            fit_result = fit_camera_response_multistart(bkg_map, p0, bounds)
-
-            if fit_result is None:
-                # L-BFGS-B can struggle when the fit parameters span very
-                # different scales; retry with the more robust (but
-                # slower) gradient-free Nelder-Mead before giving up.
+            fit_result = None
+            # L-BFGS-B is fast but can struggle when the fit parameters
+            # span very different scales; retry with the more robust
+            # (but slower) gradient-free Nelder-Mead before giving up.
+            # The default L-BFGS-B evaluation limit (15000) can be hit
+            # just before convergence, with the parameters already
+            # settled, so it is raised here.
+            for method, options in (
+                ('L-BFGS-B', dict(maxfun=50000, maxiter=50000)),
+                ('Nelder-Mead', dict(maxiter=50000, maxfev=50000, adaptive=True)),
+            ):
                 try:
                     fit_result = bkg_map.fit_camera_response(
-                        p0, bounds=bounds, method='Nelder-Mead',
-                        options=dict(maxiter=50000, maxfev=50000, adaptive=True)
+                        p0, bounds=bounds, method=method, options=options
                     )
-                    if not fit_result.success:
-                        fit_result = None
+                    if fit_result.success:
+                        break
+                    fit_result = None
                 except Exception:  # pylint: disable=broad-except
                     fit_result = None
 
