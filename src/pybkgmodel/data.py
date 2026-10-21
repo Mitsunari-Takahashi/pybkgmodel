@@ -29,12 +29,26 @@ def find_run_neighbours(target_run, run_list, time_delta, pointing_delta):
         (2) the end of the target run and the start of its "neighbour"
     pointing_delta: astropy.units.quantity.Quantity
         Maximal pointing difference between the target and the "neibhbour" runs.
+
+    Returns
+    -------
+    neighbours: tuple of RunSummary
+        Neighbouring runs. The target run itself is never included,
+        even if it satisfies the time and pointing criteria (which it
+        does whenever its duration is shorter than time_delta): callers
+        add it explicitly, so including it here would count its events
+        twice.
     """
+
+    neihbours = filter(
+        lambda run_: run_.file_name != target_run.file_name,
+        run_list
+    )
 
     neihbours = filter(
         lambda run_: (abs(run_.mjd_start - target_run.mjd_stop)*u.d < time_delta) or
                      (abs(run_.mjd_stop - target_run.mjd_start)*u.d < time_delta),
-        run_list
+        neihbours
     )
 
     neihbours = filter(
