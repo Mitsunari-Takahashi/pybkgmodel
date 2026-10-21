@@ -422,49 +422,6 @@ class BkgMakerBase:
         return maps
 
     @staticmethod
-    def stack_maps(bkg_maps, x_edges, y_edges, e_edges) -> RectangularCameraImage:
-        """
-        Returns a stacked bkg map of all the runs.
-
-        Parameters
-        ----------
-        bkg_maps : dict
-            Dictionary containing the bkg maps and output names for each run.
-
-        x_edges : np.ndarray
-            Array of the bin edges along the x/azimuth axis; linear binning.
-
-        y_edges : np.ndarray
-            Array of the bin edges along the y/Zenith axis; linear binning.
-
-        e_edges : np.ndarray
-            Array of the bin edges in energy; logarithmic binning.
-
-        Returns
-        -------
-        RectangularCameraImage
-        """
-        counts = np.sum([m.counts for m in bkg_maps.values()],
-                           axis=0)
-        exposure = u.Quantity([m.exposure for m in bkg_maps.values()]
-                              ).sum(axis=0)
-
-        # A pixel masked out (zero exposure) in every contributing
-        # runwise map ends up with zero exposure here too; without a
-        # mask reflecting that, it would be treated downstream as a
-        # legitimate (near-)zero observation rather than as missing
-        # data.
-        mask = exposure > 0 * u.s
-
-        stacked_map = RectangularCameraImage(counts,
-                                             x_edges,
-                                             y_edges,
-                                             e_edges,
-                                             mask=mask,
-                                             exposure=exposure)
-        return stacked_map
-
-    @staticmethod
     def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=POSTERIOR_PRIOR_STRENGTH):
         """
         Save diagnostic plot images for a single background map: the
@@ -655,12 +612,18 @@ class Stacked(BkgMakerBase):
             Dictionary containing the stacked bkg map and output name.
         """
 
-        self.generate_runwise_maps()
-        stacked_map = self.stack_maps(self.bkg_maps,
-                                      self.x_edges,
-                                      self.y_edges,
-                                      self.e_edges
-                                      )
+        # Each run is read, masked and counted exactly once. Stacking
+        # the runwise maps instead would count every run once per map
+        # it is a neighbour in, so the stacked counts would not follow
+        # Poisson statistics, and runs with more neighbours would weigh
+        # more.
+        with progressbar.ProgressBar(max_value=len(self.runs)) as progress:
+            def runs():
+                for run_idx, run in enumerate(self.runs):
+                    yield run
+                    progress.update(run_idx + 1)
+
+            stacked_map = self._bkg_map_maker.get_stacked_bkg(runs=runs())
 
         stacked_name = os.path.join(
                 self.out_dir,

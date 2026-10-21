@@ -67,6 +67,64 @@ class BaseMap:
         else:
             raise RuntimeError(f"Unsupported file format for '{target_run.file_name}'.")
 
+    def read_image(self, run):
+        """Function reading a single run into an (unmasked) camera image.
+
+        Parameters
+        ----------
+        run : RunSummary
+            Run to read.
+
+        Returns
+        -------
+        image : RectangularCameraImage
+            Counts and exposure of the run in each camera bin.
+        pointing : SkyCoord
+            Mean telescope pointing of the run.
+        """
+        event_file, = self.read_runs(target_run=run, neighbours=(), cuts=self.cuts)
+
+        image = RectangularCameraImage.from_events(event_file,
+                                                   self.xedges,
+                                                   self.yedges,
+                                                   self.energy_edges
+                                                   )
+        pointing = SkyCoord(ra=event_file.pointing_ra.mean(),
+                            dec=event_file.pointing_dec.mean()
+                            )
+
+        return image, pointing
+
+    def sum_images(self, images)->RectangularCameraImage:
+        """Function summing (masked) camera images into a background map.
+
+        Parameters
+        ----------
+        images : list of RectangularCameraImage
+            Images to sum.
+
+        Returns
+        -------
+        RectangularCameraImage
+            Summed counts and exposure.
+        """
+        counts = np.sum([im.counts for im in images], axis=0)
+        exposure = u.Quantity([im.exposure for im in images]).sum(axis=0)
+
+        # A pixel masked out in every contributing image ends up with
+        # zero exposure here; without a mask reflecting that, it would
+        # be treated downstream as a legitimate (near-)zero observation
+        # rather than as missing data.
+        mask = exposure > 0 * u.s
+
+        return RectangularCameraImage(counts,
+                                      self.xedges,
+                                      self.yedges,
+                                      self.energy_edges,
+                                      mask=mask,
+                                      exposure=exposure
+                                      )
+
 
 class WobbleMap(BaseMap):
     """
@@ -178,22 +236,66 @@ class WobbleMap(BaseMap):
             src_cam = src_coord.transform_to(image.center.skyoffset_frame())
             image.mask_half(src_cam)
 
-        counts = np.sum([im.counts for im in images], axis=0)
-        exposure = u.Quantity([im.exposure for im in images]).sum(axis=0)
+        return self.sum_images(images)
 
-        # A pixel masked out in every contributing image (e.g. never
-        # covered by an unmasked half in any of the stacked runs) ends
-        # up with zero exposure here; without a mask reflecting that,
-        # it would be treated downstream as a legitimate (near-)zero
-        # observation rather than as missing data.
-        mask = exposure > 0 * u.s
+    def get_stacked_bkg(self, runs=None)->RectangularCameraImage:
+        """Function for obtaining a background map stacked over all runs
+        using the Wobble map method.
 
-        return RectangularCameraImage(counts, self.xedges,
-                                      self.yedges,
-                                      self.energy_edges,
-                                      mask=mask,
-                                      exposure=exposure
-                                      )
+        Every run is read and counted exactly once: its image is masked
+        and added to the stack. Unlike stacking the runwise maps (which
+        each also contain the neighbouring runs), this keeps every
+        event counted once, so the stacked counts follow Poisson
+        statistics and every run is weighted by its own exposure only.
+
+        As in get_runwise_bkg(), the half of each run's camera
+        containing the source is masked, the source position being
+        the mean pointing of the run and its neighbours.
+
+        Parameters
+        ----------
+        runs : iterable of RunSummary, optional
+            Runs to stack, by default self.runs. Their neighbours are
+            searched among self.runs.
+
+        Returns
+        -------
+        RectangularCameraImage
+            Returns a camera object containing the event counts and exposure
+            for each camera bin.
+        """
+        if runs is None:
+            runs = self.runs
+
+        images = {}
+        pointings = {}
+        for run in runs:
+            images[run.file_name], pointings[run.file_name] = self.read_image(run)
+
+        for run in self.runs:
+            if run.file_name not in images:
+                continue
+
+            neighbours = find_run_neighbours(run,
+                                             self.runs,
+                                             self.time_delta,
+                                             self.pointing_delta
+                                             )
+            # Neighbours outside of the stacked runs have not been
+            # read, so their pointing is not known here.
+            group = [pointings[r.file_name] for r in (run,) + neighbours
+                     if r.file_name in pointings]
+
+            src_coord = SkyCoord(
+                ra=u.Quantity([p.ra for p in group]).mean(),
+                dec=u.Quantity([p.dec for p in group]).mean()
+            )
+
+            image = images[run.file_name]
+            src_cam = src_coord.transform_to(image.center.skyoffset_frame())
+            image.mask_half(src_cam)
+
+        return self.sum_images(list(images.values()))
 
 class ExclusionMap(BaseMap):
     """
@@ -302,20 +404,38 @@ class ExclusionMap(BaseMap):
             for region in self.regions:
                 image.mask_region(region[0])
 
-        counts = np.sum([im.counts for im in images], axis=0)
-        exposure = u.Quantity([im.exposure for im in images]).sum(axis=0)
+        return self.sum_images(images)
 
-        # A pixel excluded in every contributing image (e.g. always
-        # inside one of the exclusion regions) ends up with zero
-        # exposure here; without a mask reflecting that, it would be
-        # treated downstream as a legitimate (near-)zero observation
-        # rather than as missing data.
-        mask = exposure > 0 * u.s
+    def get_stacked_bkg(self, runs=None)->RectangularCameraImage:
+        """Function for obtaining a background map stacked over all runs
+        using the Exclusion map method.
 
-        return RectangularCameraImage(counts,
-                                      self.xedges,
-                                      self.yedges,
-                                      self.energy_edges,
-                                      mask=mask,
-                                      exposure=exposure
-                                      )
+        Every run is read and counted exactly once: its image is masked
+        with the exclusion regions and added to the stack. Unlike
+        stacking the runwise maps (which each also contain the
+        neighbouring runs), this keeps every event counted once, so the
+        stacked counts follow Poisson statistics and every run is
+        weighted by its own exposure only.
+
+        Parameters
+        ----------
+        runs : iterable of RunSummary, optional
+            Runs to stack, by default self.runs.
+
+        Returns
+        -------
+        RectangularCameraImage
+            Returns a camera object containing the event counts and exposure
+            for each camera bin.
+        """
+        if runs is None:
+            runs = self.runs
+
+        images = []
+        for run in runs:
+            image, _ = self.read_image(run)
+            for region in self.regions:
+                image.mask_region(region[0])
+            images.append(image)
+
+        return self.sum_images(images)
