@@ -68,7 +68,7 @@ def default_camera_response_guess(bkg_map):
     phi_tail0 = 0.0
 
     w0 = 0.5
-    delta_w0 = 0.0
+    delta_w0 = -1.0
 
     alpha0 = 1.7
     beta0 = 0.1
@@ -479,8 +479,8 @@ class BkgMakerBase:
         base_path : str
             Output path without extension. '_map_bin<i>.png',
             '_fit_check_bin<i>.png', '_counts_smoothing_bin<i>.png',
-            '_fit_spectrum.png' and '_smoothing_neighbourhood.png' are
-            appended to it.
+            '_fit_spectrum.png', '_core_fraction.png' and
+            '_smoothing_neighbourhood.png' are appended to it.
         result : scipy.optimize.OptimizeResult, optional
             Result of bkg_map.fit_camera_response(), must have a
             model_counts attribute, used as the posterior_counts()
@@ -518,6 +518,10 @@ class BkgMakerBase:
         if result is not None:
             fig, _ = bkg_map.plot_fit_spectrum(result, prior_strength=prior_strength)
             fig.savefig(f"{base_path}_fit_spectrum.png")
+            pyplot.close(fig)
+
+            fig, _ = bkg_map.plot_core_fraction(result)
+            fig.savefig(f"{base_path}_core_fraction.png")
             pyplot.close(fig)
 
             fig, _ = bkg_map.plot_smoothing_neighbourhood(

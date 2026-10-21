@@ -194,6 +194,35 @@ def low_energy_cutoff(e, eth, s):
     return np.exp(-np.power(eth/e, s))
 
 
+def core_fraction(e, w0, delta_w, e0):
+    """
+    Energy-dependent fraction of the camera_response() spatial
+    distribution's weight in the Gaussian core,
+
+        w(e) = sigmoid(logit(w0) + delta_w*log(e/e0))
+
+    (see camera_response()).
+
+    Parameters
+    ----------
+    e: array_like
+        Energy.
+    w0: array_like
+        Core fraction at e = e0 (0 < w0 < 1).
+    delta_w: array_like
+        Logistic energy dependence of the core fraction.
+    e0: array_like
+        Reference energy, in the same unit as e.
+
+    Returns
+    -------
+    w: array_like
+        Core fraction at e.
+    """
+    w_logit0 = np.log(w0 / (1 - w0))
+    return 1 / (1 + np.exp(-(w_logit0 + delta_w*np.log(e/e0))))
+
+
 def camera_response(x, y, e,
                      sigma_core0, delta_sigma_core, x0_core, y0_core,
                      sigma_tail, gamma_tail, ecc_tail, phi_tail,
@@ -266,10 +295,9 @@ def camera_response(x, y, e,
     """
     sigma_core = sigma_core0 * np.power(e/e0, delta_sigma_core)
 
-    w_logit0 = np.log(w0 / (1 - w0))
-    w = 1 / (1 + np.exp(-(w_logit0 + delta_w*np.log(e/e0))))
+    w = core_fraction(e, w0, delta_w, e0)
 
-    core = super_gaussian(x, y, sigma_core, p=1.0, x0=x0_core, y0=y0_core)
+    core =super_gaussian(x, y, sigma_core, p=1.0, x0=x0_core, y0=y0_core)
     tail = king_function(x, y, sigma_tail, gamma_tail, ecc=ecc_tail, phi=phi_tail)
     spatial = w*core + (1 - w)*tail
 
@@ -1556,6 +1584,54 @@ f"""{type(self).__name__} instance
         fig.tight_layout()
 
         return fig, (ax_spec, ax_pull)
+
+    def plot_core_fraction(self, result, e_unit='TeV'):
+        """
+        Plot the fitted Gaussian core fraction w(e) of camera_response()
+        (see core_fraction()) as a function of energy, with the tail
+        fraction 1 - w(e) for reference. The curves span the energy
+        range of this image; markers show the energy bin centers, and a
+        vertical line the fitted reference energy e0, where w = w0.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response().
+        e_unit: str
+            Unit to use for the energy axis.
+
+        Returns
+        -------
+        fig, ax: matplotlib figure and axes
+        """
+        # w0, delta_w and e0 are the 9th, 10th and 12th camera_response()
+        # parameters; e0 is in TeV (see fit_camera_response()).
+        w0, delta_w, e0 = result.x[8], result.x[9], result.x[11]
+
+        e_fine = np.geomspace(self.energy_edges[0], self.energy_edges[-1], 200)
+        e_center = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1])
+
+        w_fine = core_fraction(e_fine.to_value(u.TeV), w0, delta_w, e0)
+        w_center = core_fraction(e_center.to_value(u.TeV), w0, delta_w, e0)
+
+        fig, ax = pyplot.subplots(figsize=(6, 4))
+
+        ax.plot(e_fine.to_value(e_unit), w_fine, '-', color='C0', label='Core (Gaussian) $w$')
+        ax.plot(e_center.to_value(e_unit), w_center, 'o', color='C0')
+        ax.plot(e_fine.to_value(e_unit), 1 - w_fine, '--', color='C1', label='Tail (King) $1 - w$')
+        ax.plot(e_center.to_value(e_unit), 1 - w_center, 'o', color='C1', mfc='none')
+        ax.axvline((e0 * u.TeV).to_value(e_unit), color='gray', ls=':', label=f'$e_0$ ($w_0$ = {w0:.3g})')
+
+        ax.set_xscale('log')
+        ax.set_ylim(0, 1)
+        ax.set_xlabel(f'Energy [{e_unit}]')
+        ax.set_ylabel('Fraction')
+        ax.set_title(rf'$\delta_w$ = {delta_w:.3g}')
+        ax.legend()
+
+        fig.tight_layout()
+
+        return fig, ax
 
     def mask_half(self, pointer):
         """Excludes the half of the camera containing the sources.
