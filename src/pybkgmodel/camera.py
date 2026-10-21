@@ -199,7 +199,7 @@ def low_energy_cutoff(e, eth, s):
 # result.x returned by the latter (see camera_response_params()).
 CAMERA_RESPONSE_PARAM_NAMES = (
     'sigma_lo', 'sigma_hi', 'e_lo', 'e_hi',
-    'x0', 'y0', 'p_lo', 'p_hi', 'ecc_lo', 'ecc_hi', 'phi',
+    'x0', 'y0', 'p_lo', 'p_hi', 'e1_lo', 'e2_lo', 'e1_hi', 'e2_hi',
     'norm', 'e_pivot', 'alpha', 'beta',
 )
 
@@ -279,6 +279,43 @@ def energy_log_linear(e, v_lo, v_hi, e_lo, e_hi, clip=False):
     return v_lo + (v_hi - v_lo) * _log_energy_fraction(e, e_lo, e_hi, clip)
 
 
+# Maximal eccentricity of the camera_response() spatial distribution,
+# see ellipticity_to_ecc_phi().
+MAX_ECCENTRICITY = 0.9
+
+
+def ellipticity_to_ecc_phi(e1, e2):
+    """
+    Eccentricity and orientation (see super_gaussian()) from the
+    Cartesian ellipticity components
+
+        (e1, e2) = ecc * (cos(2*phi), sin(2*phi))
+
+    used as camera_response() parameters. Unlike (ecc, phi), these are
+    smooth through the circular case ecc = 0, where phi is undefined,
+    so a fit does not get stuck there, and their interpolation in
+    energy lets the orientation change with energy too. The
+    eccentricity is capped at MAX_ECCENTRICITY.
+
+    Parameters
+    ----------
+    e1, e2: array_like
+        Ellipticity components.
+
+    Returns
+    -------
+    ecc: array_like
+        Eccentricity, 0 <= ecc <= MAX_ECCENTRICITY.
+    phi: array_like
+        Orientation in radians of the major axis with respect to the
+        x axis, in (-pi/2, pi/2].
+    """
+    ecc = np.minimum(np.hypot(e1, e2), MAX_ECCENTRICITY)
+    phi = 0.5 * np.arctan2(e2, e1)
+
+    return ecc, phi
+
+
 def camera_response_params(result):
     """
     Fitted camera_response() parameters by name.
@@ -300,7 +337,7 @@ def camera_response_params(result):
 
 def camera_response(x, y, e,
                      sigma_lo, sigma_hi, e_lo, e_hi,
-                     x0, y0, p_lo, p_hi, ecc_lo, ecc_hi, phi,
+                     x0, y0, p_lo, p_hi, e1_lo, e2_lo, e1_hi, e2_hi,
                      norm, e_pivot, alpha, beta):
     """
     Camera background response model, defined as the product of:
@@ -313,16 +350,18 @@ def camera_response(x, y, e,
     3. a log-parabola function of e.
 
     The spatial distribution is centered at (x0, y0). Its width, its
-    exponent p and its eccentricity ecc vary with energy, each given
-    by its values at e_lo and e_hi:
+    exponent p and its ellipticity vary with energy, each given by its
+    values at e_lo and e_hi:
     - the width sigma as a power law (see energy_power_law()),
       extrapolated outside of [e_lo, e_hi],
     - p as a power law, held constant outside of [e_lo, e_hi],
-    - ecc linearly in log(e) (see energy_log_linear()), held constant
-      outside of [e_lo, e_hi], so it stays within its bounds (ecc < 1).
-    Its center and orientation phi have no energy dependence. p = 1
-    is a Gaussian; p < 1 gives a more peaked shape with heavier wings,
-    p > 1 a flat top with a steep edge.
+    - the ellipticity components (e1, e2) linearly in log(e) (see
+      energy_log_linear()), held constant outside of [e_lo, e_hi];
+      they give the eccentricity and orientation, which can both
+      change with energy (see ellipticity_to_ecc_phi()).
+    Its center has no energy dependence. p = 1 is a Gaussian; p < 1
+    gives a more peaked shape with heavier wings, p > 1 a flat top with
+    a steep edge.
 
     Parameters
     ----------
@@ -335,11 +374,12 @@ def camera_response(x, y, e,
         e_hi, see energy_power_law().
     x0, y0: array_like
         Center of the spatial distribution.
-    p_lo, p_hi, ecc_lo, ecc_hi: array_like
-        Exponent and eccentricity of the spatial distribution (see
-        super_gaussian()) at the energies e_lo and e_hi.
-    phi: array_like
-        Orientation of the spatial distribution, see super_gaussian().
+    p_lo, p_hi: array_like
+        Exponent of the spatial distribution (see super_gaussian()) at
+        the energies e_lo and e_hi.
+    e1_lo, e2_lo, e1_hi, e2_hi: array_like
+        Ellipticity components of the spatial distribution at the
+        energies e_lo and e_hi, see ellipticity_to_ecc_phi().
     norm, e_pivot, alpha, beta: array_like
         Parameters of the log-parabola function of e (e_pivot being
         its reference energy e0), see log_parabola().
@@ -351,7 +391,10 @@ def camera_response(x, y, e,
     """
     sigma = energy_power_law(e, sigma_lo, sigma_hi, e_lo, e_hi)
     p = energy_power_law(e, p_lo, p_hi, e_lo, e_hi, clip=True)
-    ecc = energy_log_linear(e, ecc_lo, ecc_hi, e_lo, e_hi, clip=True)
+    ecc, phi = ellipticity_to_ecc_phi(
+        energy_log_linear(e, e1_lo, e1_hi, e_lo, e_hi, clip=True),
+        energy_log_linear(e, e2_lo, e2_hi, e_lo, e_hi, clip=True),
+    )
     spatial = super_gaussian(x, y, sigma, p=p, ecc=ecc, phi=phi, x0=x0, y0=y0)
 
     return (
@@ -896,7 +939,7 @@ f"""{type(self).__name__} instance
         p0: array_like
             Initial guess for the camera_response() fit parameters
             (sigma_lo, sigma_hi, e_lo, e_hi, x0, y0, p_lo, p_hi,
-            ecc_lo, ecc_hi, phi,
+            e1_lo, e2_lo, e1_hi, e2_hi,
             norm, e_pivot, alpha, beta), see CAMERA_RESPONSE_PARAM_NAMES.
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
@@ -1414,16 +1457,20 @@ f"""{type(self).__name__} instance
             e_range = (params['e_lo'], params['e_hi'])
             sigma = energy_power_law(e_tev, params['sigma_lo'], params['sigma_hi'], *e_range)
             p = energy_power_law(e_tev, params['p_lo'], params['p_hi'], *e_range, clip=True)
-            ecc = energy_log_linear(e_tev, params['ecc_lo'], params['ecc_hi'], *e_range, clip=True)
+            ecc, phi = ellipticity_to_ecc_phi(
+                energy_log_linear(e_tev, params['e1_lo'], params['e1_hi'], *e_range, clip=True),
+                energy_log_linear(e_tev, params['e2_lo'], params['e2_hi'], *e_range, clip=True),
+            )
             semi_major = sigma / np.sqrt(1 - ecc) * u.deg
             semi_minor = sigma * np.sqrt(1 - ecc) * u.deg
             ax.add_patch(Ellipse(
                 (to_unit(x0), to_unit(y0)), 2*to_unit(semi_major), 2*to_unit(semi_minor),
-                angle=np.degrees(params['phi']),
+                angle=np.degrees(phi),
                 fill=False, edgecolor=shape_color, linestyle=linestyle, linewidth=1.8
             ))
             ax.plot([], [], linestyle, color=shape_color,
-                    label=f'Sigma ellipse at {e:.2f} ({semi_major:.2f} x {semi_minor:.2f}, p = {p:.2f})')
+                    label=f'Sigma ellipse at {e:.2f} ({semi_major:.2f} x {semi_minor:.2f}, '
+                          f'phi = {phi:+.2f} rad, p = {p:.2f})')
 
         ax.plot([], [], '--', color='gray', label=f'|dphi| <= {max_dphi.to_value(u.deg):g} deg, |dr| <= {max_dr.to_value(u.deg):g} deg')
         ax.plot([], [], ':', color='gray', label=f'distance <= {max_dist.to_value(u.deg):g} deg')

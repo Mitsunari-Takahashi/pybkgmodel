@@ -20,7 +20,8 @@ from pybkgmodel.message import message
 from pybkgmodel.model import (WobbleMap,
                               ExclusionMap
                             )
-from pybkgmodel.camera import RectangularCameraImage, CAMERA_RESPONSE_PARAM_NAMES, super_gaussian
+from pybkgmodel.camera import (RectangularCameraImage, CAMERA_RESPONSE_PARAM_NAMES,
+                               MAX_ECCENTRICITY, super_gaussian)
 
 # Order of the camera_response() fit parameters, as expected by
 # CameraImage.fit_camera_response() / fitted_differential_rate(), see
@@ -29,9 +30,10 @@ from pybkgmodel.camera import RectangularCameraImage, CAMERA_RESPONSE_PARAM_NAME
 #   super-Gaussian acceptance shape at the two ends of the fitted
 #   energy range (power law in between).
 # x0, y0: its (energy-independent) center.
-# p_lo, p_hi, ecc_lo, ecc_hi: its exponent and eccentricity at the two
-#   ends of the fitted energy range.
-# phi: its (energy-independent) orientation.
+# p_lo, p_hi: its exponent at the two ends of the fitted energy range.
+# e1_lo, e2_lo, e1_hi, e2_hi: its ellipticity components (eccentricity
+#   and orientation, see pybkgmodel.camera.ellipticity_to_ecc_phi())
+#   at the two ends of the fitted energy range.
 # (the linear function of y has both its slope and intercept fixed,
 #   i.e. no y-dependence, for now; see camera_response())
 # norm, e_pivot, alpha, beta: log-parabola function of energy.
@@ -117,12 +119,18 @@ def default_camera_response_guess(bkg_map):
     # wings, p > 1 a flat top with a steep edge.
     p0_ = 1.0
 
-    # Eccentricity and orientation start from the second moments of the
-    # observed counts. Starting from an arbitrary orientation instead,
-    # the fit tends to drive the eccentricity to 0 (its best value for a
-    # wrong orientation), where the orientation no longer affects the
-    # model, and gets stuck there.
-    ecc0, phi0 = counts_ellipticity(bkg_map, in_range)
+    # The ellipticity starts from the second moments of the observed
+    # counts, separately in the lower and upper halves (in log energy)
+    # of the fitted energy range, as the orientation can differ between
+    # low and high energies.
+    e = np.sqrt(bkg_map.energy_edges[1:] * bkg_map.energy_edges[:-1]).to_value(u.TeV)
+    lower = in_range & (e <= np.sqrt(e_lo0 * e_hi0))
+    upper = in_range & ~lower
+    ellipticity0 = []
+    for bins in (lower, upper if upper.any() else lower):
+        ecc0, phi0 = counts_ellipticity(bkg_map, bins)
+        ellipticity0.append((ecc0 * np.cos(2 * phi0), ecc0 * np.sin(2 * phi0)))
+    (e1_lo0, e2_lo0), (e1_hi0, e2_hi0) = ellipticity0
 
     # The log-parabola pivot energy is fixed: it is only a reference
     # point, which could otherwise be traded against norm, alpha and
@@ -143,7 +151,7 @@ def default_camera_response_guess(bkg_map):
 
     p0 = [
         sigma_lo0, sigma_hi0, e_lo0, e_hi0,
-        x00, y00, p0_, p0_, ecc0, ecc0, phi0,
+        x00, y00, p0_, p0_, e1_lo0, e2_lo0, e1_hi0, e2_hi0,
         norm0, e_pivot, alpha0, beta0,
     ]
 
@@ -158,9 +166,10 @@ def default_camera_response_guess(bkg_map):
         (0.5, 5.0),                        # p_lo
         (0.3, 5.0),                        # p_hi (high energies favour a
                                             # peaked shape, p < 1)
-        (0.0, 0.9),                        # ecc_lo
-        (0.0, 0.9),                        # ecc_hi
-        (-np.pi / 2, np.pi / 2),           # phi
+        (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),  # e1_lo (the eccentricity
+        (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),  # e2_lo  is also capped in
+        (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),  # e1_hi  the model, see
+        (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),  # e2_hi  ellipticity_to_ecc_phi())
         (norm0 / 1e3, norm0 * 1e3),        # norm
         (e_pivot, e_pivot),                # e_pivot (fixed, see above)
         (0.0, 3.0),                        # alpha
