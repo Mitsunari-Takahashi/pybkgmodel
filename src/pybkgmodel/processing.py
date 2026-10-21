@@ -374,6 +374,14 @@ SMOOTHING_MAX_DIST = 0.25 * u.deg
 # on its own (see CameraImage.fit_single_bins()).
 DATA_SMOOTHING_PEAK_FRACTION = 0.1
 
+# Minimal pixel width of the residual panel of the fit check plots (see
+# CameraImage.plot_fit_check()): RESIDUAL_MIN_WIDTH, or, from the energy
+# bin containing RESIDUAL_HIGH_ENERGY upwards, where the counts per
+# pixel are low, RESIDUAL_MIN_WIDTH_HIGH_ENERGY.
+RESIDUAL_MIN_WIDTH = 0.3 * u.deg
+RESIDUAL_MIN_WIDTH_HIGH_ENERGY = 0.5 * u.deg
+RESIDUAL_HIGH_ENERGY = 5 * u.TeV
+
 # list of class attributes, which have a unit assigned
 quantity_list = [
                 'time_delta',
@@ -693,8 +701,10 @@ class BkgMakerBase:
                 fig.savefig(f"{base_path}_counts_smoothing_bin{i}.png", bbox_inches='tight')
                 pyplot.close(fig)
 
+                high_energy = bkg_map.energy_edges[i + 1] > RESIDUAL_HIGH_ENERGY
                 fig, _ = bkg_map.plot_fit_check(
                     result, energy_bin_id=i, prior_strength=prior_strength,
+                    residual_min_width=RESIDUAL_MIN_WIDTH_HIGH_ENERGY if high_energy else RESIDUAL_MIN_WIDTH,
                     smoothing=dict(
                         max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST,
                         data_peak_fraction=DATA_SMOOTHING_PEAK_FRACTION
