@@ -60,7 +60,7 @@ def king_function(x, y, sigma, gamma, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
     return (1 - 1/gamma) / (2*np.pi*sigma_x*sigma_y) * np.power(1 + r2/(2*gamma), -gamma)
 
 
-def super_gaussian(x, y, sigma, p, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
+def super_gaussian(x, y, sigma, p, ecc=0.0, phi=0.0, x0=0.0, y0=0.0, a_u=0.0, a_v=0.0):
     """
     2D super-Gaussian function, a generalization of a 2D Gaussian with
     a tunable flatness at the center, elongated into an ellipse of
@@ -72,6 +72,14 @@ def super_gaussian(x, y, sigma, p, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
     (with a steeper falloff further out, unlike king_function()'s
     power-law tail, this one always falls off exponentially); p < 1
     gives a sharper (more cusped) peak than a Gaussian.
+
+    The function can be made asymmetric along both ellipse axes: on
+    the positive side of the major axis (in the direction phi) the
+    width along it is multiplied by (1 + a_u), on the negative side by
+    (1 - a_u), and likewise along the minor axis with a_v. The value
+    and its first derivatives stay continuous across the axes, and the
+    normalization is unchanged, as the widths on both sides add up to
+    twice the symmetric one.
 
     Parameters
     ----------
@@ -91,6 +99,9 @@ def super_gaussian(x, y, sigma, p, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
         respect to the x axis. Defaults to 0.
     x0, y0: array_like
         Center. Defaults to 0.
+    a_u, a_v: array_like
+        Asymmetry along the major and minor ellipse axes, -1 < a < 1
+        (see above). Defaults to 0 (symmetric).
 
     Returns
     -------
@@ -109,7 +120,13 @@ def super_gaussian(x, y, sigma, p, ecc=0.0, phi=0.0, x0=0.0, y0=0.0):
     sigma_x = sigma / np.sqrt(1 - ecc)
     sigma_y = sigma * np.sqrt(1 - ecc)
 
-    r2 = (x_rot/sigma_x)**2 + (y_rot/sigma_y)**2
+    # Side-dependent widths of the asymmetric version (the
+    # normalization below only depends on their two-sided averages,
+    # sigma_x and sigma_y).
+    side_x = sigma_x * np.where(x_rot >= 0, 1 + a_u, 1 - a_u)
+    side_y = sigma_y * np.where(y_rot >= 0, 1 + a_v, 1 - a_v)
+
+    r2 = (x_rot/side_x)**2 + (y_rot/side_y)**2
 
     # Exact 2D normalization for the elliptical super-Gaussian; reduces
     # to the usual 1/(2*pi*sigma_x*sigma_y) Gaussian normalization at
@@ -199,7 +216,8 @@ def low_energy_cutoff(e, eth, s):
 # result.x returned by the latter (see camera_response_params()).
 CAMERA_RESPONSE_PARAM_NAMES = (
     'sigma_lo', 'sigma_hi', 'e_lo', 'e_hi',
-    'x0', 'y0', 'p_lo', 'p_hi', 'e1_lo', 'e2_lo', 'e1_hi', 'e2_hi',
+    'x0_lo', 'y0_lo', 'x0_hi', 'y0_hi', 'p_lo', 'p_hi', 'e1_lo', 'e2_lo', 'e1_hi', 'e2_hi',
+    'au_lo', 'av_lo', 'au_hi', 'av_hi',
     'norm', 'e_pivot', 'alpha', 'beta',
 )
 
@@ -337,7 +355,8 @@ def camera_response_params(result):
 
 def camera_response(x, y, e,
                      sigma_lo, sigma_hi, e_lo, e_hi,
-                     x0, y0, p_lo, p_hi, e1_lo, e2_lo, e1_hi, e2_hi,
+                     x0_lo, y0_lo, x0_hi, y0_hi, p_lo, p_hi, e1_lo, e2_lo, e1_hi, e2_hi,
+                     au_lo, av_lo, au_hi, av_hi,
                      norm, e_pivot, alpha, beta):
     """
     Camera background response model, defined as the product of:
@@ -358,8 +377,11 @@ def camera_response(x, y, e,
     - the ellipticity components (e1, e2) linearly in log(e) (see
       energy_log_linear()), held constant outside of [e_lo, e_hi];
       they give the eccentricity and orientation, which can both
-      change with energy (see ellipticity_to_ecc_phi()).
-    Its center has no energy dependence. p = 1 is a Gaussian; p < 1
+      change with energy (see ellipticity_to_ecc_phi()),
+    - the center (x0, y0) and the asymmetry along the ellipse axes
+      (a_u, a_v, see super_gaussian()) linearly in log(e), held
+      constant outside of [e_lo, e_hi].
+    p = 1 is a Gaussian; p < 1
     gives a more peaked shape with heavier wings, p > 1 a flat top with
     a steep edge.
 
@@ -380,6 +402,10 @@ def camera_response(x, y, e,
     e1_lo, e2_lo, e1_hi, e2_hi: array_like
         Ellipticity components of the spatial distribution at the
         energies e_lo and e_hi, see ellipticity_to_ecc_phi().
+    au_lo, av_lo, au_hi, av_hi: array_like
+        Asymmetry of the spatial distribution along its major (u) and
+        minor (v) axes at the energies e_lo and e_hi, see
+        super_gaussian().
     norm, e_pivot, alpha, beta: array_like
         Parameters of the log-parabola function of e (e_pivot being
         its reference energy e0), see log_parabola().
@@ -395,7 +421,11 @@ def camera_response(x, y, e,
         energy_log_linear(e, e1_lo, e1_hi, e_lo, e_hi, clip=True),
         energy_log_linear(e, e2_lo, e2_hi, e_lo, e_hi, clip=True),
     )
-    spatial = super_gaussian(x, y, sigma, p=p, ecc=ecc, phi=phi, x0=x0, y0=y0)
+    x0 = energy_log_linear(e, x0_lo, x0_hi, e_lo, e_hi, clip=True)
+    y0 = energy_log_linear(e, y0_lo, y0_hi, e_lo, e_hi, clip=True)
+    a_u = energy_log_linear(e, au_lo, au_hi, e_lo, e_hi, clip=True)
+    a_v = energy_log_linear(e, av_lo, av_hi, e_lo, e_hi, clip=True)
+    spatial = super_gaussian(x, y, sigma, p=p, ecc=ecc, phi=phi, x0=x0, y0=y0, a_u=a_u, a_v=a_v)
 
     return (
         spatial
@@ -485,11 +515,12 @@ def _polar_neighbours(geometry, k, limits):
     return polar | close
 
 
-def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr, max_dist=0*u.deg):
+def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr, max_dist=0*u.deg, weights=None):
     """
     Moving average of a camera map over polar neighbourhoods around
-    the point (x0, y0): for each pixel, the new value is the plain mean
-    over the pixels in its neighbourhood, see polar_neighbourhood().
+    the point (x0, y0): for each pixel, the new value is the mean over
+    the pixels in its neighbourhood (see polar_neighbourhood()),
+    optionally weighted.
 
     Parameters
     ----------
@@ -501,11 +532,15 @@ def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr, max_dist=0*u.de
         Center of the polar coordinate system.
     max_dphi, max_dr, max_dist: astropy.units.Quantity
         Neighbourhood limits, see polar_neighbourhood().
+    weights: array_like, optional
+        Weight of each pixel, of shape (nx, ny), e.g. 0 for pixels to
+        leave out of the averages. Defaults to equal weights.
 
     Returns
     -------
     averaged: array_like or astropy.units.Quantity
-        Averaged map(s), of the same shape and unit as values.
+        Averaged map(s), of the same shape and unit as values. NaN for
+        pixels whose neighbourhood has zero total weight.
     """
     unit = getattr(values, 'unit', None)
     values = np.asarray(getattr(values, 'value', values), dtype=float)
@@ -515,9 +550,17 @@ def polar_moving_average(values, x, y, x0, y0, max_dphi, max_dr, max_dist=0*u.de
 
     flat = values.reshape(values.shape[:-2] + (-1,))
     averaged = np.empty_like(flat)
+    w = np.ones(flat.shape[-1]) if weights is None else np.asarray(weights, dtype=float).ravel()
+    # Pixels left out (zero weight) may hold non-finite values.
+    flat = np.where(w > 0, flat, 0.0)
 
     for k in range(flat.shape[-1]):
-        averaged[..., k] = flat[..., _polar_neighbours(geometry, k, limits)].mean(axis=-1)
+        neighbours = _polar_neighbours(geometry, k, limits)
+        total = w[neighbours].sum()
+        if total > 0:
+            averaged[..., k] = (flat[..., neighbours] * w[neighbours]).sum(axis=-1) / total
+        else:
+            averaged[..., k] = np.nan
 
     averaged = averaged.reshape(values.shape)
     if unit is not None:
@@ -885,6 +928,30 @@ f"""{type(self).__name__} instance
 
         return dnde, result
 
+    def low_count_bins(self, peak_fraction):
+        """
+        Energy bins below the bin with the highest total count (in the
+        unmasked pixels), holding less than peak_fraction of its counts:
+        near and below the energy threshold, where the spatial
+        distribution departs from the fitted camera_response() shape
+        (see smoothed_posterior_rate()).
+
+        Parameters
+        ----------
+        peak_fraction: float
+            Fraction of the peak bin's counts.
+
+        Returns
+        -------
+        low: numpy.ndarray of bool
+            Whether each energy bin is such a low-count bin.
+        """
+        mask = np.broadcast_to(self.mask, self.raw_counts.shape)
+        bin_totals = (self.raw_counts * mask).sum(axis=(1, 2))
+        peak_bin = np.argmax(bin_totals)
+
+        return (np.arange(len(bin_totals)) < peak_bin) & (bin_totals < peak_fraction * bin_totals[peak_bin])
+
     def fit_energy_range(self, min_counts=1000):
         """
         Energy bins included in fit_camera_response(): the bin with the
@@ -941,8 +1008,8 @@ f"""{type(self).__name__} instance
         ----------
         p0: array_like
             Initial guess for the camera_response() fit parameters
-            (sigma_lo, sigma_hi, e_lo, e_hi, x0, y0, p_lo, p_hi,
-            e1_lo, e2_lo, e1_hi, e2_hi,
+            (sigma_lo, sigma_hi, e_lo, e_hi, x0_lo, y0_lo, x0_hi, y0_hi, p_lo, p_hi,
+            e1_lo, e2_lo, e1_hi, e2_hi, au_lo, av_lo, au_hi, av_hi,
             norm, e_pivot, alpha, beta), see CAMERA_RESPONSE_PARAM_NAMES.
             x, y and e (camera coordinates and energy) are not fitted:
             they are set to the pixel / energy bin centers of this image,
@@ -1180,7 +1247,7 @@ f"""{type(self).__name__} instance
         e0 = (emin * emax)**0.5
         return (index + 1) / e0 / ((emax/e0).decompose()**(index + 1) - (emin/e0).decompose()**(index + 1))
 
-    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg):
+    def smoothed_posterior_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg, data_peak_fraction=None, energy_bins=None):
         """
         Bayesian posterior rate (see posterior_rate()), smoothed by a
         moving average over polar neighbourhoods around the fitted
@@ -1204,6 +1271,15 @@ f"""{type(self).__name__} instance
         that pixels of slightly different solid angle are weighted
         consistently.
 
+        If data_peak_fraction is given, the low-count energy bins below
+        the count peak (see low_count_bins()), near and below the
+        energy threshold, are treated differently: there the spatial
+        distribution departs from the fitted shape, so neither the
+        Bayesian update nor the shape correction is used. Their
+        observed rate is smoothed by a plain moving average over the
+        unmasked pixels, masked pixels being filled from their unmasked
+        neighbours (see _data_smoothed_rate()).
+
         Parameters
         ----------
         result: scipy.optimize.OptimizeResult
@@ -1221,23 +1297,30 @@ f"""{type(self).__name__} instance
             Distance between pixel centers within which pixels are
             always averaged together, whatever max_dphi and max_dr
             (see polar_neighbourhood()). Defaults to 0.25 deg.
+        data_peak_fraction: float, optional
+            If given, the energy bins below the count peak holding less
+            than this fraction of its counts are smoothed from the data
+            alone (see above). Defaults to None (not used).
+        energy_bins: array_like of int, optional
+            Indices of the energy bins to compute, e.g. to plot a single
+            one. Defaults to None (all energy bins).
 
         Returns
         -------
         rate: array_like astropy.unit.Quantity
             Smoothed posterior rate, of the same shape as
-            CameraImage.counts.
+            CameraImage.counts (or of the selected energy bins only, see
+            energy_bins).
         """
-        x0, y0 = self._model_center(result)
-        x = (self.xedges[1:] + self.xedges[:-1]) / 2
-        y = (self.yedges[1:] + self.yedges[:-1]) / 2
+        n_e = len(self.energy_edges) - 1
+        selected = np.arange(n_e) if energy_bins is None else np.atleast_1d(energy_bins)
 
-        posterior = self.posterior_rate(result, prior_strength=prior_strength)
+        posterior = self.posterior_rate(result, prior_strength=prior_strength)[selected]
         posterior_density = posterior / self.pixel_area
-        model_density = result.model_rate / self.pixel_area
+        model_density = result.model_rate[selected] / self.pixel_area
 
-        averaged = polar_moving_average(posterior_density, x, y, x0, y0, max_dphi, max_dr, max_dist)
-        model_averaged = polar_moving_average(model_density, x, y, x0, y0, max_dphi, max_dr, max_dist)
+        averaged = self._centered_moving_average(result, posterior_density, selected, max_dphi, max_dr, max_dist)
+        model_averaged = self._centered_moving_average(result, model_density, selected, max_dphi, max_dr, max_dist)
 
         # Shape correction f_i / <f>_i; left out (i.e. 1) where the
         # neighbourhood model average vanishes.
@@ -1260,10 +1343,68 @@ f"""{type(self).__name__} instance
             (posterior_sum / np.where(valid, smoothed_sum, 1 * smoothed_sum.unit)).decompose().value,
             1.0
         )
+        smoothed = smoothed * scale[:, None, None]
+
+        if data_peak_fraction is not None:
+            low = self.low_count_bins(data_peak_fraction)[selected]
+            if low.any():
+                smoothed[low] = self._data_smoothed_rate(
+                    result, selected[low], max_dphi=max_dphi, max_dr=max_dr, max_dist=max_dist
+                )
+
+        return smoothed
+
+    def _centered_moving_average(self, result, values, energy_bins, max_dphi, max_dr, max_dist, weights=None):
+        """
+        polar_moving_average() of each of the given energy bins' maps
+        (values, of shape (len(energy_bins), nx, ny)), around the model
+        center at that bin's energy (see _model_center()).
+        """
+        x = (self.xedges[1:] + self.xedges[:-1]) / 2
+        y = (self.yedges[1:] + self.yedges[:-1]) / 2
+        e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(u.TeV)[energy_bins]
+        x0, y0 = self._model_center(result, e)
+
+        return u.Quantity([
+            polar_moving_average(values[i], x, y, x0[i], y0[i], max_dphi, max_dr, max_dist, weights=weights)
+            for i in range(len(energy_bins))
+        ])
+
+    def _data_smoothed_rate(self, result, energy_bins, max_dphi, max_dr, max_dist):
+        """
+        Observed rate of the given energy bins, smoothed by a plain
+        moving average over the unmasked pixels only (see
+        smoothed_posterior_rate()). Masked pixels are filled with the
+        average of their unmasked neighbours, or with the fitted model
+        rate where there is none; pixels outside of the field of view
+        (see mask_outside_fov()) are 0. The result is renormalized, per
+        energy bin, so that its sum over the unmasked pixels equals
+        that of the observed rate.
+        """
+        with np.errstate(invalid='ignore', divide='ignore'):
+            data_rate = self.counts[energy_bins] / self.raw_exposure
+        data_rate = np.where(self.mask, data_rate, 0 * data_rate.unit)
+        model_density = result.model_rate[energy_bins] / self.pixel_area
+
+        averaged = self._centered_moving_average(
+            result, data_rate / self.pixel_area, energy_bins, max_dphi, max_dr, max_dist,
+            weights=self.mask
+        )
+        averaged = np.where(np.isfinite(averaged.value), averaged, model_density)
+        smoothed = averaged * self.pixel_area * self.inside_fov
+
+        data_sum = data_rate.sum(axis=(1, 2))
+        smoothed_sum = (smoothed * self.mask).sum(axis=(1, 2))
+        valid = smoothed_sum.value > 0
+        scale = np.where(
+            valid,
+            (data_sum / np.where(valid, smoothed_sum, 1 * smoothed_sum.unit)).decompose().value,
+            1.0
+        )
 
         return smoothed * scale[:, None, None]
 
-    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg, index=-2):
+    def smoothed_posterior_differential_rate(self, result, prior_strength=1.0, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg, data_peak_fraction=None, index=-2):
         """
         Same as posterior_differential_rate(), but based on the
         smoothed posterior rate of smoothed_posterior_rate().
@@ -1276,6 +1417,9 @@ f"""{type(self).__name__} instance
             Prior weight, see posterior_counts().
         max_dphi, max_dr, max_dist: astropy.units.Quantity
             Smoothing neighbourhood, see smoothed_posterior_rate().
+        data_peak_fraction: float, optional
+            Low-count energy bins smoothed from the data alone, see
+            smoothed_posterior_rate().
         index: float
             Power law spectral index, see differential_rate().
             Defaults to -2.
@@ -1287,16 +1431,22 @@ f"""{type(self).__name__} instance
             the camera image.
         """
         rate = self.smoothed_posterior_rate(
-            result, prior_strength=prior_strength, max_dphi=max_dphi, max_dr=max_dr, max_dist=max_dist
+            result, prior_strength=prior_strength, max_dphi=max_dphi, max_dr=max_dr, max_dist=max_dist,
+            data_peak_fraction=data_peak_fraction
         )
 
         return rate / self.pixel_area * self._int2diff(index)[:, None, None]
 
     @staticmethod
-    def _model_center(result):
-        """Fitted center (x0, y0) of the camera_response() spatial distribution."""
+    def _model_center(result, e):
+        """Fitted center (x0, y0) of the camera_response() spatial
+        distribution at the energies e (in TeV), see camera_response()."""
         params = camera_response_params(result)
-        return params['x0'] * u.deg, params['y0'] * u.deg
+        e_range = (params['e_lo'], params['e_hi'])
+        x0 = energy_log_linear(e, params['x0_lo'], params['x0_hi'], *e_range, clip=True)
+        y0 = energy_log_linear(e, params['y0_lo'], params['y0_hi'], *e_range, clip=True)
+
+        return x0 * u.deg, y0 * u.deg
 
     def plot_smoothing_neighbourhood(self, result, max_dphi=10*u.deg, max_dr=0.25*u.deg, max_dist=0.25*u.deg, pixels=None, energy_bin_id=None, ax_unit='deg'):
         """
@@ -1315,7 +1465,8 @@ f"""{type(self).__name__} instance
         bin are shown underneath (masked pixels blank), the averaged
         pixels are outlined instead of filled so the counts stay
         visible, and the sigma ellipse is drawn at the energy bin's
-        center only (see camera_response()).
+        center only (see camera_response()). Each ellipse is centered at
+        the model center at its energy.
 
         Parameters
         ----------
@@ -1344,7 +1495,13 @@ f"""{type(self).__name__} instance
         from matplotlib.colors import ListedColormap
         from matplotlib.patches import Circle, Ellipse, Rectangle, Wedge
 
-        x0, y0 = self._model_center(result)
+        # The neighbourhoods are drawn around the model center at the
+        # energy of the counts shown, or at e_lo without counts.
+        if energy_bin_id is not None:
+            e_center = np.sqrt(self.energy_edges[energy_bin_id] * self.energy_edges[energy_bin_id + 1]).to_value(u.TeV)
+        else:
+            e_center = camera_response_params(result)['e_lo']
+        x0, y0 = self._model_center(result, e_center)
         x = (self.xedges[1:] + self.xedges[:-1]) / 2
         y = (self.yedges[1:] + self.yedges[:-1]) / 2
         xx, yy = np.meshgrid(x.to_value(u.deg), y.to_value(u.deg), indexing='ij')
@@ -1464,10 +1621,11 @@ f"""{type(self).__name__} instance
                 energy_log_linear(e_tev, params['e1_lo'], params['e1_hi'], *e_range, clip=True),
                 energy_log_linear(e_tev, params['e2_lo'], params['e2_hi'], *e_range, clip=True),
             )
+            x0e, y0e = self._model_center(result, e_tev)
             semi_major = sigma / np.sqrt(1 - ecc) * u.deg
             semi_minor = sigma * np.sqrt(1 - ecc) * u.deg
             ax.add_patch(Ellipse(
-                (to_unit(x0), to_unit(y0)), 2*to_unit(semi_major), 2*to_unit(semi_minor),
+                (to_unit(x0e), to_unit(y0e)), 2*to_unit(semi_major), 2*to_unit(semi_minor),
                 angle=np.degrees(phi),
                 fill=False, edgecolor=shape_color, linestyle=linestyle, linewidth=1.8
             ))
@@ -1559,7 +1717,9 @@ f"""{type(self).__name__} instance
         pixel_area = self.pixel_area
 
         if smoothing is not None:
-            smoothed_rate = self.smoothed_posterior_rate(result, prior_strength=prior_strength, **smoothing)[energy_bin_id]
+            smoothed_rate = self.smoothed_posterior_rate(
+                result, prior_strength=prior_strength, energy_bins=[energy_bin_id], **smoothing
+            )[0]
             model_counts = (smoothed_rate * self.raw_exposure).decompose().value
             residual_name = 'smoothed'
         else:
@@ -1597,8 +1757,11 @@ f"""{type(self).__name__} instance
 
         if smoothing is not None:
             smoothed = (smoothed_rate / pixel_area).to_value(val_unit)
+            fraction = smoothing.get('data_peak_fraction')
+            data_only = fraction is not None and self.low_count_bins(fraction)[energy_bin_id]
+            smoothed_title = 'Smoothed data rate (no fit)' if data_only else 'Smoothed posterior rate'
             panels.append((
-                self.xedges, self.yedges, smoothed, f'Smoothed posterior rate [{val_unit}]',
+                self.xedges, self.yedges, smoothed, f'{smoothed_title} [{val_unit}]',
                 dict(vmin=0, vmax=smoothed.max(), cmap=cmap)
             ))
         else:
@@ -1635,7 +1798,7 @@ f"""{type(self).__name__} instance
 
         return fig, axes
 
-    def plot_fit_spectrum(self, result, e_unit='TeV', prior_strength=10.0, val_unit='1/s'):
+    def plot_fit_spectrum(self, result, e_unit='TeV', prior_strength=10.0, val_unit='1/s', data_peak_fraction=None):
         """
         Plot the observed vs. Bayesian posterior rate (see
         posterior_rate() -- the camera_response() fit used as the
@@ -1658,9 +1821,11 @@ f"""{type(self).__name__} instance
         from the corresponding rates.
 
         Data points in energy bins used in the fit (see
-        fit_energy_range()) are filled, the others open, and dotted
-        lines mark e_lo and e_hi, the energies at which the shape
-        parameters are given (see camera_response()).
+        fit_energy_range()) are filled circles, those of the low-count
+        bins smoothed from the data alone (see data_peak_fraction) open
+        squares, and the others open circles. Dotted lines mark e_lo
+        and e_hi, the energies at which the shape parameters are given
+        (see camera_response()).
 
         Parameters
         ----------
@@ -1674,6 +1839,9 @@ f"""{type(self).__name__} instance
             Defaults to 10.0.
         val_unit: str
             Unit to use for the count-rate axis.
+        data_peak_fraction: float, optional
+            Low-count energy bins smoothed from the data alone, see
+            smoothed_posterior_rate(). Only used to mark them.
 
         Returns
         -------
@@ -1715,10 +1883,19 @@ f"""{type(self).__name__} instance
         fitted, _, _ = self.fit_energy_range()
         params = camera_response_params(result)
 
-        for sel, mfc, label in ((fitted, 'k', 'Data (fitted)'), (~fitted, 'none', 'Data (not fitted)')):
+        if data_peak_fraction is None:
+            data_only = np.zeros_like(fitted)
+        else:
+            data_only = self.low_count_bins(data_peak_fraction)
+
+        for sel, fmt, mfc, label in (
+            (fitted, 'o', 'k', 'Data (fitted)'),
+            (~fitted & ~data_only, 'o', 'none', 'Data (not fitted)'),
+            (data_only, 's', 'none', 'Data (smoothed from data only)'),
+        ):
             if sel.any():
-                ax_spec.errorbar(e[sel], data[sel], yerr=data_err[sel], fmt='o', color='k', mfc=mfc, label=label)
-                ax_pull.plot(e[sel], residual[sel], 'o', color='k', mfc=mfc)
+                ax_spec.errorbar(e[sel], data[sel], yerr=data_err[sel], fmt=fmt, color='k', mfc=mfc, label=label)
+                ax_pull.plot(e[sel], residual[sel], fmt, color='k', mfc=mfc)
         ax_spec.plot(e, model, '-', color='C1', label='Posterior')
 
         for ax in (ax_spec, ax_pull):
