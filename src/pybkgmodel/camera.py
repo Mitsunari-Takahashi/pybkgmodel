@@ -654,7 +654,7 @@ class CameraImage:
             mask = np.ones((nx, ny), dtype=bool)
 
         if exposure is None:
-            exposure = np.ones((nx, ny), dtype=np.float) * u.s
+            exposure = np.ones((nx, ny), dtype=float) * u.s
         elif exposure.shape == ():
             exposure = np.repeat(exposure, nx * ny).reshape((nx, ny))
 
