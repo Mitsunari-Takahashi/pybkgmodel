@@ -370,6 +370,8 @@ SMOOTHING_MAX_DIST = 0.25 * u.deg
 # its counts (near and below the energy threshold) depart from the
 # fitted shape: their background model is the observed rate smoothed
 # alone, without the fit (see CameraImage.smoothed_posterior_rate()).
+# The bins below the peak holding at least this fraction are fit each
+# on its own (see CameraImage.fit_single_bins()).
 DATA_SMOOTHING_PEAK_FRACTION = 0.1
 
 # list of class attributes, which have a unit assigned
@@ -747,7 +749,9 @@ class BkgMakerBase:
         total per energy bin (see CameraImage.smoothed_posterior_rate()).
         In the low-count energy bins below the count peak (less than
         DATA_SMOOTHING_PEAK_FRACTION of its counts), the observed rate is
-        smoothed alone instead, without the fit.
+        smoothed alone instead, without the fit; the other bins below
+        the peak are fit each on its own first (see
+        CameraImage.fit_single_bins()).
 
         Diagnostic plot images (the rate map, and, if the fit
         succeeded, the posterior fit-quality checks) are saved
@@ -797,6 +801,17 @@ class BkgMakerBase:
                 message(f"Best-fit camera_response parameters for '{key}':")
                 for name, val in zip(CAMERA_RESPONSE_PARAM_NAMES, fit_result.x):
                     print(f"    {name:12s} = {val: .6g}")
+
+                # Energy bins just above the threshold are fit on their
+                # own (see CameraImage.fit_single_bins()).
+                bkg_map.fit_single_bins(fit_result, DATA_SMOOTHING_PEAK_FRACTION)
+                e_edges = bkg_map.energy_edges
+                for i, params in fit_result.single_bin_fits.items():
+                    message(f"Single-bin fit of energy bin {i} [{e_edges[i]:.2f}, {e_edges[i + 1]:.2f}]:")
+                    print("    " + ", ".join(f"{name} = {val:.4g}" for name, val in params.items()))
+                failed = np.nonzero(bkg_map.single_fit_bins(DATA_SMOOTHING_PEAK_FRACTION))[0]
+                for i in (int(i) for i in failed if int(i) not in fit_result.single_bin_fits):
+                    message(f"Single-bin fit of energy bin {i} did not converge; smoothing it from the data alone.")
 
             base_path, _ = os.path.splitext(key)
             BkgMakerBase.save_diagnostic_plots(bkg_map, base_path, result=fit_result)

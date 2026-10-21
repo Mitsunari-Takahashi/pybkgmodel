@@ -334,6 +334,55 @@ def ellipticity_to_ecc_phi(e1, e2):
     return ecc, phi
 
 
+# Names of the parameters of a single-energy-bin fit of the spatial
+# distribution (see CameraImage.fit_single_bins(), single_bin_response()).
+SINGLE_BIN_PARAM_NAMES = ('x0', 'y0', 'sigma', 'p', 'e1', 'e2', 'a_u', 'a_v', 'norm')
+
+
+def single_bin_response(x, y, x0, y0, sigma, p, e1, e2, a_u, a_v, norm):
+    """
+    Spatial background model of a single energy bin, fit on its own
+    near the energy threshold (see CameraImage.fit_single_bins()): an
+    elliptical, possibly asymmetric super-Gaussian (see
+    super_gaussian(), ellipticity_to_ecc_phi()) times a normalization.
+
+    Parameters
+    ----------
+    x, y: array_like
+        Camera plane coordinates, in degrees.
+    x0, y0, sigma, p, e1, e2, a_u, a_v: array_like
+        Center, width, exponent, ellipticity components and asymmetry,
+        see camera_response().
+    norm: array_like
+        Normalization.
+
+    Returns
+    -------
+    val: array_like
+        Model value, in the units of camera_response().
+    """
+    ecc, phi = ellipticity_to_ecc_phi(e1, e2)
+    return norm * super_gaussian(x, y, sigma, p, ecc=ecc, phi=phi, x0=x0, y0=y0, a_u=a_u, a_v=a_v)
+
+
+def _minimize_with_restarts(fun, x0, bounds, max_restarts=5, tol=0.1):
+    """L-BFGS-B minimization, restarted from its result until the
+    objective improves by less than tol (see
+    pybkgmodel.processing.restart_fit()). None if it does not converge."""
+    options = dict(maxfun=50000, maxiter=50000)
+    result = scipy.optimize.minimize(fun, x0, bounds=bounds, method='L-BFGS-B', options=options)
+    if not result.success:
+        return None
+    for _ in range(max_restarts):
+        restarted = scipy.optimize.minimize(fun, result.x, bounds=bounds, method='L-BFGS-B', options=options)
+        if not restarted.success or restarted.fun > result.fun - tol:
+            if restarted.success and restarted.fun < result.fun:
+                result = restarted
+            break
+        result = restarted
+    return result
+
+
 def camera_response_params(result):
     """
     Fitted camera_response() parameters by name.
@@ -952,6 +1001,60 @@ f"""{type(self).__name__} instance
 
         return (np.arange(len(bin_totals)) < peak_bin) & (bin_totals < peak_fraction * bin_totals[peak_bin])
 
+    def single_fit_bins(self, peak_fraction):
+        """
+        Energy bins below the bin with the highest total count (in the
+        unmasked pixels), holding at least peak_fraction of its counts:
+        just above the energy threshold, where the spatial distribution
+        departs from the shape of the fitted camera_response() but the
+        counts suffice to fit each bin on its own (see
+        fit_single_bins()).
+
+        Parameters
+        ----------
+        peak_fraction: float
+            Fraction of the peak bin's counts.
+
+        Returns
+        -------
+        selected: numpy.ndarray of bool
+            Whether each energy bin is such a bin.
+        """
+        mask = np.broadcast_to(self.mask, self.raw_counts.shape)
+        bin_totals = (self.raw_counts * mask).sum(axis=(1, 2))
+        peak_bin = np.argmax(bin_totals)
+
+        return ((np.arange(len(bin_totals)) < peak_bin)
+                & (bin_totals >= peak_fraction * bin_totals[peak_bin]) & (bin_totals > 0))
+
+    def data_only_bins(self, result, peak_fraction):
+        """
+        Energy bins whose background model is the observed rate smoothed
+        alone (see smoothed_posterior_rate()): the low-count bins (see
+        low_count_bins()), and the bins to be fit on their own (see
+        single_fit_bins()) whose fit did not converge.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), after fit_single_bins() if
+            it was run.
+        peak_fraction: float
+            Fraction of the peak bin's counts, see low_count_bins().
+
+        Returns
+        -------
+        selected: numpy.ndarray of bool
+            Whether each energy bin is such a bin.
+        """
+        selected = self.low_count_bins(peak_fraction)
+        fitted = getattr(result, 'single_bin_fits', {})
+        for i in np.nonzero(self.single_fit_bins(peak_fraction))[0]:
+            if int(i) not in fitted:
+                selected[i] = True
+
+        return selected
+
     def fit_energy_range(self, min_counts=1000):
         """
         Energy bins included in fit_camera_response(): the bin with the
@@ -1097,6 +1200,102 @@ f"""{type(self).__name__} instance
         # dividing by zero. The same per-energy-bin rescaling as
         # model_counts above is applied here too, for consistency.
         result.model_rate = camera_response(xx, yy, ee, *result.x) * inside_fov / u.s * scale[:, None, None]
+
+        return result
+
+    def fit_single_bins(self, result, peak_fraction):
+        """
+        Fit the energy bins just above the energy threshold (see
+        single_fit_bins()) each on its own, with an elliptical,
+        possibly asymmetric super-Gaussian (see single_bin_response()),
+        and replace the model of fit_camera_response() in these bins
+        with it. The global model, which does not include these bins in
+        its fit, does not follow their spatial distribution (e.g. a
+        center shifted by ~0.7 deg at large zenith angles).
+
+        Each bin is fit from the first and second moments of its counts,
+        directly and in two stages (symmetric first), keeping the better
+        fit, as for the global model (see
+        pybkgmodel.processing.fit_camera_response_two_ways()). As in
+        fit_camera_response(), the model is 0 outside of the field of
+        view and rescaled to the observed counts in the unmasked pixels.
+        Bins whose fit does not converge keep the global model, and are
+        smoothed from the data alone (see data_only_bins()).
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response(), updated in place:
+            model_counts and model_rate of the fitted bins are replaced,
+            and result.single_bin_fits maps each fitted bin's index to
+            its parameters (a dict keyed by SINGLE_BIN_PARAM_NAMES).
+        peak_fraction: float
+            Fraction of the peak bin's counts, see single_fit_bins().
+
+        Returns
+        -------
+        result: scipy.optimize.OptimizeResult
+            The updated result.
+        """
+        result.single_bin_fits = {}
+
+        x = ((self.xedges[1:] + self.xedges[:-1]) / 2).to_value(u.deg)
+        y = ((self.yedges[1:] + self.yedges[:-1]) / 2).to_value(u.deg)
+        xx, yy = np.meshgrid(x, y, indexing='ij')
+        exposure = self.raw_exposure.to_value(u.s)
+        inside_fov = self.inside_fov
+        mask = self.mask
+        pixel_area = (np.diff(self.xedges)[0] * np.diff(self.yedges)[0]).to_value(u.deg**2)
+
+        x_min, x_max = self.xedges[0].to_value(u.deg), self.xedges[-1].to_value(u.deg)
+        y_min, y_max = self.yedges[0].to_value(u.deg), self.yedges[-1].to_value(u.deg)
+        x_range = x_max - x_min
+        i_asym = [SINGLE_BIN_PARAM_NAMES.index(name) for name in ('a_u', 'a_v')]
+
+        for i in np.nonzero(self.single_fit_bins(peak_fraction))[0]:
+            counts = self.raw_counts[i] * mask
+            total = counts.sum()
+
+            # Starting values from the counts' moments.
+            cx, cy = (counts * xx).sum() / total, (counts * yy).sum() / total
+            cxx = (counts * (xx - cx)**2).sum() / total
+            cyy = (counts * (yy - cy)**2).sum() / total
+            cxy = (counts * (xx - cx) * (yy - cy)).sum() / total
+            eigenvalues = np.linalg.eigvalsh([[cxx, cxy], [cxy, cyy]])
+            sigma0 = np.clip(np.sqrt(np.sqrt(max(eigenvalues[0], 1e-6) * eigenvalues[1])), x_range / 100, x_range)
+            ecc0 = np.clip(1 - np.sqrt(max(eigenvalues[0], 0) / eigenvalues[1]), 0.02, 0.8)
+            phi0 = 0.5 * np.arctan2(2 * cxy, cxx - cyy)
+            norm0 = total * pixel_area / exposure[mask].mean()
+
+            p0 = [cx, cy, sigma0, 1.0, ecc0 * np.cos(2 * phi0), ecc0 * np.sin(2 * phi0), 0.0, 0.0, norm0]
+            bounds = [
+                (x_min, x_max), (y_min, y_max), (x_range / 100, x_range), (0.3, 5.0),
+                (-MAX_ECCENTRICITY, MAX_ECCENTRICITY), (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),
+                (-0.6, 0.6), (-0.6, 0.6), (norm0 / 1e3, norm0 * 1e3),
+            ]
+            symmetric_bounds = [(0.0, 0.0) if k in i_asym else b for k, b in enumerate(bounds)]
+
+            def neg_log_likelihood(q, counts=counts):
+                model = np.maximum(single_bin_response(xx, yy, *q) * exposure, 1e-30)
+                return cstat(counts[mask], model[mask])
+
+            candidates = [_minimize_with_restarts(neg_log_likelihood, p0, bounds)]
+            symmetric = _minimize_with_restarts(neg_log_likelihood, p0, symmetric_bounds)
+            if symmetric is not None:
+                candidates.append(_minimize_with_restarts(neg_log_likelihood, symmetric.x, bounds))
+            candidates = [c for c in candidates if c is not None and np.isfinite(c.fun)]
+            if not candidates:
+                continue
+            best = min(candidates, key=lambda c: c.fun)
+
+            rate = single_bin_response(xx, yy, *best.x) * inside_fov
+            model_counts = rate * exposure
+            model_sum = (model_counts * mask).sum()
+            scale = total / model_sum if model_sum > 0 else 1.0
+
+            result.model_counts[i] = model_counts * scale
+            result.model_rate[i] = rate * scale / u.s
+            result.single_bin_fits[int(i)] = dict(zip(SINGLE_BIN_PARAM_NAMES, (float(v) for v in best.x)))
 
         return result
 
@@ -1346,7 +1545,7 @@ f"""{type(self).__name__} instance
         smoothed = smoothed * scale[:, None, None]
 
         if data_peak_fraction is not None:
-            low = self.low_count_bins(data_peak_fraction)[selected]
+            low = self.data_only_bins(result, data_peak_fraction)[selected]
             if low.any():
                 smoothed[low] = self._data_smoothed_rate(
                     result, selected[low], max_dphi=max_dphi, max_dr=max_dr, max_dist=max_dist
@@ -1358,12 +1557,11 @@ f"""{type(self).__name__} instance
         """
         polar_moving_average() of each of the given energy bins' maps
         (values, of shape (len(energy_bins), nx, ny)), around the model
-        center at that bin's energy (see _model_center()).
+        center of that bin (see _bin_centers()).
         """
         x = (self.xedges[1:] + self.xedges[:-1]) / 2
         y = (self.yedges[1:] + self.yedges[:-1]) / 2
-        e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(u.TeV)[energy_bins]
-        x0, y0 = self._model_center(result, e)
+        x0, y0 = self._bin_centers(result, energy_bins)
 
         return u.Quantity([
             polar_moving_average(values[i], x, y, x0[i], y0[i], max_dphi, max_dr, max_dist, weights=weights)
@@ -1437,6 +1635,22 @@ f"""{type(self).__name__} instance
 
         return rate / self.pixel_area * self._int2diff(index)[:, None, None]
 
+    def _bin_centers(self, result, energy_bins):
+        """Model center (x0, y0) of each of the given energy bins: that
+        of its own fit for the bins fit on their own (see
+        fit_single_bins()), that of the global model at the bin's
+        energy otherwise (see _model_center())."""
+        e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(u.TeV)[energy_bins]
+        x0, y0 = self._model_center(result, e)
+        x0, y0 = np.array(x0.to_value(u.deg), ndmin=1), np.array(y0.to_value(u.deg), ndmin=1)
+
+        fits = getattr(result, 'single_bin_fits', {})
+        for k, i in enumerate(energy_bins):
+            if int(i) in fits:
+                x0[k], y0[k] = fits[int(i)]['x0'], fits[int(i)]['y0']
+
+        return x0 * u.deg, y0 * u.deg
+
     @staticmethod
     def _model_center(result, e):
         """Fitted center (x0, y0) of the camera_response() spatial
@@ -1498,10 +1712,10 @@ f"""{type(self).__name__} instance
         # The neighbourhoods are drawn around the model center at the
         # energy of the counts shown, or at e_lo without counts.
         if energy_bin_id is not None:
-            e_center = np.sqrt(self.energy_edges[energy_bin_id] * self.energy_edges[energy_bin_id + 1]).to_value(u.TeV)
+            x0, y0 = self._bin_centers(result, [energy_bin_id])
+            x0, y0 = x0[0], y0[0]
         else:
-            e_center = camera_response_params(result)['e_lo']
-        x0, y0 = self._model_center(result, e_center)
+            x0, y0 = self._model_center(result, camera_response_params(result)['e_lo'])
         x = (self.xedges[1:] + self.xedges[:-1]) / 2
         y = (self.yedges[1:] + self.yedges[:-1]) / 2
         xx, yy = np.meshgrid(x.to_value(u.deg), y.to_value(u.deg), indexing='ij')
@@ -1612,16 +1826,24 @@ f"""{type(self).__name__} instance
         else:
             ellipses = [(params['e_lo'] * u.TeV, '-'), (params['e_hi'] * u.TeV, '-.')]
 
+        single = getattr(result, 'single_bin_fits', {}).get(energy_bin_id) if on_counts else None
+
         for e, linestyle in ellipses:
             e_tev = e.to_value(u.TeV)
             e_range = (params['e_lo'], params['e_hi'])
-            sigma = energy_power_law(e_tev, params['sigma_lo'], params['sigma_hi'], *e_range)
-            p = energy_power_law(e_tev, params['p_lo'], params['p_hi'], *e_range, clip=True)
-            ecc, phi = ellipticity_to_ecc_phi(
-                energy_log_linear(e_tev, params['e1_lo'], params['e1_hi'], *e_range, clip=True),
-                energy_log_linear(e_tev, params['e2_lo'], params['e2_hi'], *e_range, clip=True),
-            )
-            x0e, y0e = self._model_center(result, e_tev)
+            if single is not None:
+                # Bin fit on its own, see fit_single_bins().
+                sigma, p = single['sigma'], single['p']
+                ecc, phi = ellipticity_to_ecc_phi(single['e1'], single['e2'])
+                x0e, y0e = single['x0'] * u.deg, single['y0'] * u.deg
+            else:
+                sigma = energy_power_law(e_tev, params['sigma_lo'], params['sigma_hi'], *e_range)
+                p = energy_power_law(e_tev, params['p_lo'], params['p_hi'], *e_range, clip=True)
+                ecc, phi = ellipticity_to_ecc_phi(
+                    energy_log_linear(e_tev, params['e1_lo'], params['e1_hi'], *e_range, clip=True),
+                    energy_log_linear(e_tev, params['e2_lo'], params['e2_hi'], *e_range, clip=True),
+                )
+                x0e, y0e = self._model_center(result, e_tev)
             semi_major = sigma / np.sqrt(1 - ecc) * u.deg
             semi_minor = sigma * np.sqrt(1 - ecc) * u.deg
             ax.add_patch(Ellipse(
@@ -1758,8 +1980,14 @@ f"""{type(self).__name__} instance
         if smoothing is not None:
             smoothed = (smoothed_rate / pixel_area).to_value(val_unit)
             fraction = smoothing.get('data_peak_fraction')
-            data_only = fraction is not None and self.low_count_bins(fraction)[energy_bin_id]
-            smoothed_title = 'Smoothed data rate (no fit)' if data_only else 'Smoothed posterior rate'
+            data_only = fraction is not None and self.data_only_bins(result, fraction)[energy_bin_id]
+            single_fit = energy_bin_id in getattr(result, 'single_bin_fits', {})
+            if data_only:
+                smoothed_title = 'Smoothed data rate (no fit)'
+            elif single_fit:
+                smoothed_title = 'Smoothed posterior rate (single-bin fit)'
+            else:
+                smoothed_title = 'Smoothed posterior rate'
             panels.append((
                 self.xedges, self.yedges, smoothed, f'{smoothed_title} [{val_unit}]',
                 dict(vmin=0, vmax=smoothed.max(), cmap=cmap)
@@ -1821,9 +2049,10 @@ f"""{type(self).__name__} instance
         from the corresponding rates.
 
         Data points in energy bins used in the fit (see
-        fit_energy_range()) are filled circles, those of the low-count
-        bins smoothed from the data alone (see data_peak_fraction) open
-        squares, and the others open circles. Dotted lines mark e_lo
+        fit_energy_range()) are filled circles, those of the bins fit on
+        their own (see fit_single_bins()) open diamonds, those smoothed
+        from the data alone (see data_only_bins()) open squares, and
+        the others open circles. Dotted lines mark e_lo
         and e_hi, the energies at which the shape parameters are given
         (see camera_response()).
 
@@ -1886,11 +2115,14 @@ f"""{type(self).__name__} instance
         if data_peak_fraction is None:
             data_only = np.zeros_like(fitted)
         else:
-            data_only = self.low_count_bins(data_peak_fraction)
+            data_only = self.data_only_bins(result, data_peak_fraction)
+        single_fit = np.zeros_like(fitted)
+        single_fit[list(getattr(result, 'single_bin_fits', {}))] = True
 
         for sel, fmt, mfc, label in (
             (fitted, 'o', 'k', 'Data (fitted)'),
-            (~fitted & ~data_only, 'o', 'none', 'Data (not fitted)'),
+            (single_fit, 'D', 'none', 'Data (single-bin fit)'),
+            (~fitted & ~data_only & ~single_fit, 'o', 'none', 'Data (not fitted)'),
             (data_only, 's', 'none', 'Data (smoothed from data only)'),
         ):
             if sel.any():
