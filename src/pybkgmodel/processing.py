@@ -21,14 +21,15 @@ from pybkgmodel.model import (WobbleMap,
                               ExclusionMap
                             )
 from pybkgmodel.camera import (RectangularCameraImage, CAMERA_RESPONSE_PARAM_NAMES,
-                               MAX_ECCENTRICITY, super_gaussian)
+                               MAX_ECCENTRICITY, MAX_ASYMMETRY, super_gaussian)
 
 # Order of the camera_response() fit parameters, as expected by
 # CameraImage.fit_camera_response() / fitted_differential_rate(), see
 # pybkgmodel.camera.CAMERA_RESPONSE_PARAM_NAMES.
-# sigma_lo, sigma_hi, e_lo, e_hi: width of the elliptical
+# sigma_lo, sigma_hi, sigma_sat, e_lo, e_hi: width of the elliptical
 #   super-Gaussian acceptance shape at the two ends of the fitted
-#   energy range (power law in between).
+#   energy range, and the saturation rate of its energy dependence
+#   (see pybkgmodel.camera.energy_saturating()).
 # x0_lo, y0_lo, x0_hi, y0_hi: its center at the two ends of the fitted
 #   energy range.
 # p_lo, p_hi: its exponent at the two ends of the fitted energy range.
@@ -184,7 +185,7 @@ def default_camera_response_guess(bkg_map):
     norm0 = max(counts_peak / max(spatial_peak * exposure0, 1e-30), 1e-10)
 
     p0 = [
-        sigma_lo0, sigma_hi0, e_lo0, e_hi0,
+        sigma_lo0, sigma_hi0, 0.0, e_lo0, e_hi0,
         x0_lo0, y0_lo0, x0_hi0, y0_hi0, p0_, p0_, e1_lo0, e2_lo0, e1_hi0, e2_hi0,
         0.0, 0.0, 0.0, 0.0,
         norm0, e_pivot, alpha0, beta0,
@@ -194,6 +195,8 @@ def default_camera_response_guess(bkg_map):
         (x_range / 100, x_range),          # sigma_lo (capped at the FOV extent:
         (x_range / 100, x_range),          # sigma_hi  wider shapes aren't
                                             #           constrained by the data)
+        (0.0, 30.0),                       # sigma_sat (saturation rate of the width's
+                                            # energy dependence; 0 is a power law)
         (e_lo0, e_lo0),                    # e_lo (fixed, see above)
         (e_hi0, e_hi0),                    # e_hi (fixed, see above)
         (x_min, x_max),                    # x0_lo
@@ -207,10 +210,10 @@ def default_camera_response_guess(bkg_map):
         (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),  # e2_lo  is also capped in
         (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),  # e1_hi  the model, see
         (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),  # e2_hi  ellipticity_to_ecc_phi())
-        (-0.6, 0.6),                       # au_lo (asymmetry along the ellipse
-        (-0.6, 0.6),                       # av_lo  axes, see super_gaussian())
-        (-0.6, 0.6),                       # au_hi
-        (-0.6, 0.6),                       # av_hi
+        (-MAX_ASYMMETRY, MAX_ASYMMETRY),   # au_lo (asymmetry along the ellipse
+        (-MAX_ASYMMETRY, MAX_ASYMMETRY),   # av_lo  axes, see super_gaussian()
+        (-MAX_ASYMMETRY, MAX_ASYMMETRY),   # au_hi  and MAX_ASYMMETRY)
+        (-MAX_ASYMMETRY, MAX_ASYMMETRY),   # av_hi
         (norm0 / 1e3, norm0 * 1e3),        # norm
         (e_pivot, e_pivot),                # e_pivot (fixed, see above)
         (0.0, 3.0),                        # alpha

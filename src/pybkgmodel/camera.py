@@ -215,7 +215,7 @@ def low_energy_cutoff(e, eth, s):
 # by camera_response() and CameraImage.fit_camera_response(), and of
 # result.x returned by the latter (see camera_response_params()).
 CAMERA_RESPONSE_PARAM_NAMES = (
-    'sigma_lo', 'sigma_hi', 'e_lo', 'e_hi',
+    'sigma_lo', 'sigma_hi', 'sigma_sat', 'e_lo', 'e_hi',
     'x0_lo', 'y0_lo', 'x0_hi', 'y0_hi', 'p_lo', 'p_hi', 'e1_lo', 'e2_lo', 'e1_hi', 'e2_hi',
     'au_lo', 'av_lo', 'au_hi', 'av_hi',
     'norm', 'e_pivot', 'alpha', 'beta',
@@ -269,6 +269,52 @@ def energy_power_law(e, v_lo, v_hi, e_lo, e_hi, clip=False):
     return v_lo * np.power(v_hi / v_lo, _log_energy_fraction(e, e_lo, e_hi, clip))
 
 
+def energy_saturating(e, v_lo, v_hi, e_lo, e_hi, rate):
+    """
+    Positive quantity of the camera_response() spatial shape varying
+    with energy through v_lo at e_lo and v_hi at e_hi, with a change
+    that saturates towards high energies:
+
+        log v(e) = log v_lo + log(v_hi / v_lo) * g(t),
+        g(t) = (1 - exp(-rate * t)) / (1 - exp(-rate))
+
+    with t = log(e/e_lo) / log(e_hi/e_lo). rate = 0 (g = t) is the
+    power law of energy_power_law(); for rate > 0 the change slows down
+    with energy and v approaches v_lo * (v_hi/v_lo)**(1/(1 - exp(-rate)))
+    at high energies, monotonically, so that its extrapolation above
+    e_hi neither keeps growing as a power law nor turns over as a
+    parabola in log-log space would. If v decreases (v_hi < v_lo), the
+    saturation does not bound its extrapolation, so it is held at v_hi
+    above e_hi instead. Below e_lo, v is held at v_lo. If e_lo == e_hi,
+    it is v_lo at all energies.
+
+    Parameters
+    ----------
+    e: array_like
+        Energy.
+    v_lo, v_hi: array_like
+        Values at e_lo and e_hi.
+    e_lo, e_hi: array_like
+        Reference energies, in the same unit as e.
+    rate: array_like
+        Saturation rate, rate >= 0 (see above).
+
+    Returns
+    -------
+    v: array_like
+        Value at e.
+    """
+    t = np.maximum(_log_energy_fraction(e, e_lo, e_hi, clip=False), 0)
+    if rate < 1e-8:
+        g = t
+    else:
+        g = np.expm1(-rate * t) / np.expm1(-rate)
+    if v_hi < v_lo:
+        g = np.minimum(g, 1)
+
+    return v_lo * np.power(v_hi / v_lo, g)
+
+
 def energy_log_linear(e, v_lo, v_hi, e_lo, e_hi, clip=False):
     """
     Quantity of the camera_response() spatial shape varying linearly
@@ -300,6 +346,14 @@ def energy_log_linear(e, v_lo, v_hi, e_lo, e_hi, clip=False):
 # Maximal eccentricity of the camera_response() spatial distribution,
 # see ellipticity_to_ecc_phi().
 MAX_ECCENTRICITY = 0.9
+
+# Maximal asymmetry along the ellipse axes of the camera_response()
+# spatial distribution (see super_gaussian()), in the fits. A larger
+# asymmetry lets the fit shift the peak far to one side and pull the
+# distribution back with a long tail on the other, mimicking a center
+# offset (seen on real data at high energies, with peaks ~0.6 deg off
+# the counts' centroid).
+MAX_ASYMMETRY = 0.3
 
 
 def ellipticity_to_ecc_phi(e1, e2):
@@ -403,7 +457,7 @@ def camera_response_params(result):
 
 
 def camera_response(x, y, e,
-                     sigma_lo, sigma_hi, e_lo, e_hi,
+                     sigma_lo, sigma_hi, sigma_sat, e_lo, e_hi,
                      x0_lo, y0_lo, x0_hi, y0_hi, p_lo, p_hi, e1_lo, e2_lo, e1_hi, e2_hi,
                      au_lo, av_lo, au_hi, av_hi,
                      norm, e_pivot, alpha, beta):
@@ -420,8 +474,12 @@ def camera_response(x, y, e,
     The spatial distribution is centered at (x0, y0). Its width, its
     exponent p and its ellipticity vary with energy, each given by its
     values at e_lo and e_hi:
-    - the width sigma as a power law (see energy_power_law()),
-      extrapolated outside of [e_lo, e_hi],
+    - the width sigma with a change that saturates towards high
+      energies at the rate sigma_sat (see energy_saturating()): a power
+      law extrapolated above e_hi made the model too broad there,
+      holding it constant above e_hi did not fit the energies below,
+      and a parabola in log-log space turned over, narrowing the model
+      at the highest energies,
     - p as a power law, held constant outside of [e_lo, e_hi],
     - the ellipticity components (e1, e2) linearly in log(e) (see
       energy_log_linear()), held constant outside of [e_lo, e_hi];
@@ -440,9 +498,10 @@ def camera_response(x, y, e,
         Camera plane coordinates.
     e: array_like
         Energy.
-    sigma_lo, sigma_hi, e_lo, e_hi: array_like
+    sigma_lo, sigma_hi, sigma_sat, e_lo, e_hi: array_like
         Width of the spatial distribution at the energies e_lo and
-        e_hi, see energy_power_law().
+        e_hi, and the saturation rate of its energy dependence, see
+        energy_saturating().
     x0, y0: array_like
         Center of the spatial distribution.
     p_lo, p_hi: array_like
@@ -464,7 +523,7 @@ def camera_response(x, y, e,
     val: array_like
         Camera response value.
     """
-    sigma = energy_power_law(e, sigma_lo, sigma_hi, e_lo, e_hi)
+    sigma = energy_saturating(e, sigma_lo, sigma_hi, e_lo, e_hi, sigma_sat)
     p = energy_power_law(e, p_lo, p_hi, e_lo, e_hi, clip=True)
     ecc, phi = ellipticity_to_ecc_phi(
         energy_log_linear(e, e1_lo, e1_hi, e_lo, e_hi, clip=True),
@@ -1111,7 +1170,7 @@ f"""{type(self).__name__} instance
         ----------
         p0: array_like
             Initial guess for the camera_response() fit parameters
-            (sigma_lo, sigma_hi, e_lo, e_hi, x0_lo, y0_lo, x0_hi, y0_hi, p_lo, p_hi,
+            (sigma_lo, sigma_hi, sigma_sat, e_lo, e_hi, x0_lo, y0_lo, x0_hi, y0_hi, p_lo, p_hi,
             e1_lo, e2_lo, e1_hi, e2_hi, au_lo, av_lo, au_hi, av_hi,
             norm, e_pivot, alpha, beta), see CAMERA_RESPONSE_PARAM_NAMES.
             x, y and e (camera coordinates and energy) are not fitted:
@@ -1271,7 +1330,7 @@ f"""{type(self).__name__} instance
             bounds = [
                 (x_min, x_max), (y_min, y_max), (x_range / 100, x_range), (0.3, 5.0),
                 (-MAX_ECCENTRICITY, MAX_ECCENTRICITY), (-MAX_ECCENTRICITY, MAX_ECCENTRICITY),
-                (-0.6, 0.6), (-0.6, 0.6), (norm0 / 1e3, norm0 * 1e3),
+                (-MAX_ASYMMETRY, MAX_ASYMMETRY), (-MAX_ASYMMETRY, MAX_ASYMMETRY), (norm0 / 1e3, norm0 * 1e3),
             ]
             symmetric_bounds = [(0.0, 0.0) if k in i_asym else b for k, b in enumerate(bounds)]
 
@@ -1837,7 +1896,7 @@ f"""{type(self).__name__} instance
                 ecc, phi = ellipticity_to_ecc_phi(single['e1'], single['e2'])
                 x0e, y0e = single['x0'] * u.deg, single['y0'] * u.deg
             else:
-                sigma = energy_power_law(e_tev, params['sigma_lo'], params['sigma_hi'], *e_range)
+                sigma = energy_saturating(e_tev, params['sigma_lo'], params['sigma_hi'], *e_range, params['sigma_sat'])
                 p = energy_power_law(e_tev, params['p_lo'], params['p_hi'], *e_range, clip=True)
                 ecc, phi = ellipticity_to_ecc_phi(
                     energy_log_linear(e_tev, params['e1_lo'], params['e1_hi'], *e_range, clip=True),
