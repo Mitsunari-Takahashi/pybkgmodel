@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.special
 import scipy.optimize
+import scipy.stats
 
 import astropy.units as u
 import astropy.io.fits as pyfits
@@ -1946,9 +1947,8 @@ f"""{type(self).__name__} instance
         smoothed_posterior_rate()) and the residuals, expressed as the
         relative residual (data - smoothed) / smoothed in counts (or
         (data - posterior) / posterior if no smoothing is given). The
-        rates are shown per unit solid angle; the data and posterior
-        maps share one color scale, while the smoothed map is scaled
-        from 0 to its own maximum. The residual is computed and shown
+        rates are shown per unit solid angle, each map scaled from 0 to
+        its own maximum. The residual is computed and shown
         on a coarser grid, merging consecutive pixels (see
         merged_bin_starts()) narrower than residual_min_width, summing
         the counts of the unmasked pixels only. Each panel has the
@@ -2029,11 +2029,9 @@ f"""{type(self).__name__} instance
         data[~mask] = np.nan
         model = (self.posterior_rate(result, prior_strength=prior_strength)[energy_bin_id] / pixel_area).to_value(val_unit)
 
-        vmax = max(np.nanmax(data), model.max())
-
         panels = [
-            (self.xedges, self.yedges, data, f'Data rate [{val_unit}]', dict(vmin=0, vmax=vmax, cmap=cmap)),
-            (self.xedges, self.yedges, model, f'Posterior rate [{val_unit}]', dict(vmin=0, vmax=vmax, cmap=cmap)),
+            (self.xedges, self.yedges, data, f'Data rate [{val_unit}]', dict(vmin=0, vmax=np.nanmax(data), cmap=cmap)),
+            (self.xedges, self.yedges, model, f'Posterior rate [{val_unit}]', dict(vmin=0, vmax=model.max(), cmap=cmap)),
         ]
 
         if smoothing is not None:
@@ -2084,6 +2082,109 @@ f"""{type(self).__name__} instance
         fig.tight_layout()
 
         return fig, axes
+
+    def plot_radial_profile(self, result, energy_bin_id, smoothing=None, prior_strength=10.0, dr=0.2*u.deg,
+                            core_radius=0.5*u.deg, ax_unit='deg'):
+        """
+        Compare the peakedness of the data and of the model in one
+        energy bin: counts per pixel in rings around the model center of
+        that bin (the smoothing center, see _bin_centers()), for the
+        data, the fitted model (result.model_counts) and, if smoothing
+        is given, the final smoothed posterior (see
+        smoothed_posterior_rate()), with the data / model ratio below.
+        Only the unmasked pixels are used.
+
+        The title gives the counts within core_radius of the center, for
+        the data and the fitted model, with the two-sided Poisson
+        probability of the observed count given the model.
+
+        Parameters
+        ----------
+        result: scipy.optimize.OptimizeResult
+            Result of fit_camera_response() (after fit_single_bins() if
+            it was run).
+        energy_bin_id: int
+            Energy bin to plot.
+        smoothing: dict, optional
+            Keyword arguments of smoothed_posterior_rate() (max_dphi,
+            max_dr, max_dist, data_peak_fraction) to also show the final
+            smoothed posterior. If None (default), it is not shown.
+        prior_strength: float or array_like
+            Prior weight, see posterior_counts().
+        dr: astropy.units.Quantity
+            Ring width. Defaults to 0.2 deg.
+        core_radius: astropy.units.Quantity
+            Radius of the central region tested in the title. Defaults
+            to 0.5 deg.
+        ax_unit: str
+            Unit to use for the radius axis.
+
+        Returns
+        -------
+        fig, (ax_profile, ax_ratio): matplotlib figure and axes
+        """
+        x0, y0 = self._bin_centers(result, [energy_bin_id])
+        x0, y0 = x0[0].to_value(u.deg), y0[0].to_value(u.deg)
+        x = ((self.xedges[1:] + self.xedges[:-1]) / 2).to_value(u.deg)
+        y = ((self.yedges[1:] + self.yedges[:-1]) / 2).to_value(u.deg)
+        xx, yy = np.meshgrid(x, y, indexing='ij')
+        r = np.hypot(xx - x0, yy - y0)
+        mask = self.mask
+
+        data = self.raw_counts[energy_bin_id] * mask
+        curves = {'Fitted model': result.model_counts[energy_bin_id] * mask}
+        if smoothing is not None:
+            smoothed = self.smoothed_posterior_rate(
+                result, prior_strength=prior_strength, energy_bins=[energy_bin_id], **smoothing
+            )[0]
+            curves['Smoothed posterior (final)'] = (smoothed * self.raw_exposure).decompose().value * mask
+
+        step = dr.to_value(u.deg)
+        edges = np.arange(0, r[mask].max() + step, step) if mask.any() else np.array([0, step])
+        centers = (edges[1:] + edges[:-1]) / 2
+        rings = [mask & (r >= a) & (r < b) for a, b in zip(edges[:-1], edges[1:])]
+        n_pix = np.array([ring.sum() for ring in rings])
+        valid = n_pix > 0
+
+        def per_pixel(values):
+            return np.array([values[ring].sum() for ring in rings])[valid] / n_pix[valid]
+
+        d = per_pixel(data)
+        d_err = np.sqrt(np.array([data[ring].sum() for ring in rings])[valid]) / n_pix[valid]
+        rc = (centers[valid] * u.deg).to_value(ax_unit)
+
+        fig, (ax_profile, ax_ratio) = pyplot.subplots(
+            2, 1, sharex=True, figsize=(6, 6), gridspec_kw=dict(height_ratios=[3, 1.3])
+        )
+        ax_profile.errorbar(rc, d, yerr=d_err, fmt='o', color='k', label='Data')
+        for (label, values), color in zip(curves.items(), ('C1', 'C0')):
+            m = per_pixel(values)
+            ax_profile.plot(rc, m, '-', color=color, label=label)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                ax_ratio.errorbar(rc, d / m, yerr=d_err / m, fmt='o', color=color, ms=4, label=label)
+
+        core = mask & (r < core_radius.to_value(u.deg))
+        n_obs, n_exp = data[core].sum(), curves['Fitted model'][core].sum()
+        if n_exp > 0:
+            p_value = min(1.0, 2 * min(scipy.stats.poisson.cdf(n_obs, n_exp), scipy.stats.poisson.sf(n_obs - 1, n_exp)))
+            core_text = (f'within {core_radius.to_value(u.deg):g} deg: data {n_obs:.0f}, '
+                         f'model {n_exp:.1f} (p = {p_value:.2g})')
+        else:
+            core_text = ''
+
+        emin = self.energy_edges[energy_bin_id]
+        emax = self.energy_edges[energy_bin_id + 1]
+        ax_profile.set_title(f'Energy bin {energy_bin_id}: [{emin:.2f}, {emax:.2f}]\n{core_text}', fontsize='medium')
+        ax_profile.set_yscale('log')
+        ax_profile.set_ylabel('Counts per pixel')
+        ax_profile.legend(fontsize='small')
+        ax_ratio.axhline(1, color='gray', ls='--')
+        ax_ratio.set_ylim(0, 2)
+        ax_ratio.set_ylabel('Data / model')
+        ax_ratio.set_xlabel(f'Distance from the model center [{ax_unit}]')
+        fig.tight_layout()
+
+        return fig, (ax_profile, ax_ratio)
 
     def plot_fit_spectrum(self, result, e_unit='TeV', prior_strength=10.0, val_unit='1/s', data_peak_fraction=None):
         """

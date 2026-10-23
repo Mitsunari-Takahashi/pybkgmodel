@@ -674,6 +674,7 @@ class BkgMakerBase:
         base_path : str
             Output path without extension. '_map_bin<i>.png',
             '_fit_check_bin<i>.png', '_counts_smoothing_bin<i>.png',
+            '_radial_profile_bin<i>.png' (energy bins with counts),
             '_fit_spectrum.png' and
             '_smoothing_neighbourhood.png' are appended to it.
         result : scipy.optimize.OptimizeResult, optional
@@ -715,6 +716,17 @@ class BkgMakerBase:
                 )
                 fig.savefig(f"{base_path}_fit_check_bin{i}.png")
                 pyplot.close(fig)
+
+                if bkg_map.counts[i].sum() > 0:
+                    fig, _ = bkg_map.plot_radial_profile(
+                        result, energy_bin_id=i, prior_strength=prior_strength,
+                        smoothing=dict(
+                            max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST,
+                            data_peak_fraction=DATA_SMOOTHING_PEAK_FRACTION
+                        )
+                    )
+                    fig.savefig(f"{base_path}_radial_profile_bin{i}.png")
+                    pyplot.close(fig)
 
         if result is not None:
             fig, _ = bkg_map.plot_fit_spectrum(
