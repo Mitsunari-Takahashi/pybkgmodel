@@ -365,13 +365,13 @@ def posterior_prior_strength(bkg_map):
 # bin's center energy, extrapolated outside of 0.4-50 TeV): the counts
 # per pixel fall with energy, so higher energies need wider averages,
 # while low energies, with many counts, keep their finer structure.
-SMOOTHING_MAX_DPHI = EnergyPowerLaw(0.4 * u.TeV, 5 * u.deg, 50 * u.TeV, 25 * u.deg)
-SMOOTHING_MAX_DR = EnergyPowerLaw(0.4 * u.TeV, 0.1 * u.deg, 50 * u.TeV, 0.6 * u.deg)
+SMOOTHING_MAX_DPHI = EnergyPowerLaw(0.4 * u.TeV, 10 * u.deg, 50 * u.TeV, 25 * u.deg)
+SMOOTHING_MAX_DR = EnergyPowerLaw(0.4 * u.TeV, 0.2 * u.deg, 50 * u.TeV, 0.6 * u.deg)
 # Pixels whose centers are within this distance of each other are
 # always averaged together, whatever their azimuth and radial distance.
 # This keeps the neighbourhood from shrinking to a thin sliver near the
 # model center, which otherwise leaves a radial pattern there.
-SMOOTHING_MAX_DIST = EnergyPowerLaw(0.4 * u.TeV, 0.1 * u.deg, 50 * u.TeV, 0.6 * u.deg)
+SMOOTHING_MAX_DIST = EnergyPowerLaw(0.4 * u.TeV, 0.2 * u.deg, 50 * u.TeV, 0.6 * u.deg)
 
 # Energy bins below the count peak holding less than this fraction of
 # its counts (near and below the energy threshold) depart from the
@@ -663,88 +663,94 @@ class BkgMakerBase:
     @staticmethod
     def save_diagnostic_plots(bkg_map, base_path, result=None, prior_strength=None):
         """
-        Save diagnostic plot images for a single background map: the
-        observed rate map (CameraImage.plot()) for every energy bin,
-        and, if a camera_response() fit result is available, the
-        spatial (CameraImage.plot_fit_check()) and spectral
-        (CameraImage.plot_fit_spectrum()) checks of the Bayesian
-        posterior counts (see CameraImage.posterior_counts()) against
-        the data.
+        Save diagnostic plot images for a single background map, given a
+        camera_response() fit result: the spatial
+        (CameraImage.plot_fit_check()), radial
+        (CameraImage.plot_radial_profile()) and spectral
+        (CameraImage.plot_fit_spectrum()) checks of the model against
+        the data, and the smoothing neighbourhoods
+        (CameraImage.plot_smoothing_neighbourhood()). Each kind of plot
+        goes into its own subdirectory, named after it, of the
+        directory of base_path.
 
         Parameters
         ----------
         bkg_map : pybkgmodel.camera.CameraImage
             Background map to plot.
         base_path : str
-            Output path without extension. '_map_bin<i>.png',
-            '_fit_check_bin<i>.png', '_counts_smoothing_bin<i>.png',
-            '_radial_profile_bin<i>.png' (energy bins with counts),
-            '_fit_spectrum.png' and
-            '_smoothing_neighbourhood.png' are appended to it.
+            Output path without extension. The plots are saved as
+            <dir>/<kind>/<name>_<kind>[_bin<i>].png, <dir>/<name> being
+            base_path and <kind> fit_check, counts_smoothing,
+            radial_profile (energy bins with counts), fit_spectrum or
+            smoothing_neighbourhood.
         result : scipy.optimize.OptimizeResult, optional
             Result of bkg_map.fit_camera_response(), must have a
             model_counts attribute, used as the posterior_counts()
-            prior. If None (default), only the plain rate map is
-            saved.
+            prior. If None (default), nothing is saved.
         prior_strength : float or numpy.ndarray, optional
             Prior weight passed to plot_fit_check() /
             plot_fit_spectrum() (see CameraImage.posterior_counts()).
             Defaults to posterior_prior_strength(bkg_map).
         """
+        if result is None:
+            return
+
         if prior_strength is None:
             prior_strength = posterior_prior_strength(bkg_map)
+
+        directory, name = os.path.split(base_path)
+
+        def plot_path(kind, energy_bin_id=None):
+            kind_directory = os.path.join(directory, kind)
+            os.makedirs(kind_directory, exist_ok=True)
+            suffix = '' if energy_bin_id is None else f'_bin{energy_bin_id}'
+            return os.path.join(kind_directory, f'{name}_{kind}{suffix}.png')
 
         n_ebins = len(bkg_map.energy_edges) - 1
 
         for i in range(n_ebins):
-            bkg_map.plot(energy_bin_id=i)
-            pyplot.savefig(f"{base_path}_map_bin{i}.png")
-            pyplot.close(pyplot.gcf())
+            fig, _ = bkg_map.plot_smoothing_neighbourhood(
+                result, max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST,
+                energy_bin_id=i
+            )
+            fig.savefig(plot_path('counts_smoothing', i), bbox_inches='tight')
+            pyplot.close(fig)
 
-            if result is not None:
-                fig, _ = bkg_map.plot_smoothing_neighbourhood(
-                    result, max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST,
-                    energy_bin_id=i
+            high_energy = bkg_map.energy_edges[i + 1] > RESIDUAL_HIGH_ENERGY
+            fig, _ = bkg_map.plot_fit_check(
+                result, energy_bin_id=i, prior_strength=prior_strength,
+                residual_min_width=RESIDUAL_MIN_WIDTH_HIGH_ENERGY if high_energy else RESIDUAL_MIN_WIDTH,
+                smoothing=dict(
+                    max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST,
+                    data_peak_fraction=DATA_SMOOTHING_PEAK_FRACTION
                 )
-                fig.savefig(f"{base_path}_counts_smoothing_bin{i}.png", bbox_inches='tight')
-                pyplot.close(fig)
+            )
+            fig.savefig(plot_path('fit_check', i))
+            pyplot.close(fig)
 
-                high_energy = bkg_map.energy_edges[i + 1] > RESIDUAL_HIGH_ENERGY
-                fig, _ = bkg_map.plot_fit_check(
+            if bkg_map.counts[i].sum() > 0:
+                fig, _ = bkg_map.plot_radial_profile(
                     result, energy_bin_id=i, prior_strength=prior_strength,
-                    residual_min_width=RESIDUAL_MIN_WIDTH_HIGH_ENERGY if high_energy else RESIDUAL_MIN_WIDTH,
                     smoothing=dict(
                         max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST,
                         data_peak_fraction=DATA_SMOOTHING_PEAK_FRACTION
                     )
                 )
-                fig.savefig(f"{base_path}_fit_check_bin{i}.png")
+                fig.savefig(plot_path('radial_profile', i))
                 pyplot.close(fig)
 
-                if bkg_map.counts[i].sum() > 0:
-                    fig, _ = bkg_map.plot_radial_profile(
-                        result, energy_bin_id=i, prior_strength=prior_strength,
-                        smoothing=dict(
-                            max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST,
-                            data_peak_fraction=DATA_SMOOTHING_PEAK_FRACTION
-                        )
-                    )
-                    fig.savefig(f"{base_path}_radial_profile_bin{i}.png")
-                    pyplot.close(fig)
+        fig, _ = bkg_map.plot_fit_spectrum(
+            result, prior_strength=prior_strength, data_peak_fraction=DATA_SMOOTHING_PEAK_FRACTION
+        )
+        fig.savefig(plot_path('fit_spectrum'))
+        pyplot.close(fig)
 
-        if result is not None:
-            fig, _ = bkg_map.plot_fit_spectrum(
-                result, prior_strength=prior_strength, data_peak_fraction=DATA_SMOOTHING_PEAK_FRACTION
-            )
-            fig.savefig(f"{base_path}_fit_spectrum.png")
-            pyplot.close(fig)
-
-            fig, _ = bkg_map.plot_smoothing_neighbourhood(
-                result, max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST
-            )
-            # The legend sits below the axes; keep it in the image.
-            fig.savefig(f"{base_path}_smoothing_neighbourhood.png", bbox_inches='tight')
-            pyplot.close(fig)
+        fig, _ = bkg_map.plot_smoothing_neighbourhood(
+            result, max_dphi=SMOOTHING_MAX_DPHI, max_dr=SMOOTHING_MAX_DR, max_dist=SMOOTHING_MAX_DIST
+        )
+        # The legend sits below the axes; keep it in the image.
+        fig.savefig(plot_path('smoothing_neighbourhood'), bbox_inches='tight')
+        pyplot.close(fig)
 
     @staticmethod
     def write_maps(bkg_maps, overwrite) -> None:
@@ -782,9 +788,9 @@ class BkgMakerBase:
         the peak are fit each on its own first (see
         CameraImage.fit_single_bins()).
 
-        Diagnostic plot images (the rate map, and, if the fit
-        succeeded, the posterior fit-quality checks) are saved
-        alongside each output FITS file, see save_diagnostic_plots().
+        If the fit succeeded, diagnostic plot images are saved in
+        subdirectories, one per kind of plot, of the directory of each
+        output FITS file, see save_diagnostic_plots().
 
         Parameters
         ----------
