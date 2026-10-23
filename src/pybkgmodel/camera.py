@@ -543,6 +543,41 @@ def camera_response(x, y, e,
     )
 
 
+class EnergyPowerLaw:
+    """
+    Quantity varying with energy as the power law through the points
+    (e1, v1) and (e2, v2), extrapolated beyond them, e.g. for a
+    smoothing neighbourhood limit that grows with energy (see
+    CameraImage.smoothed_posterior_rate()).
+
+    Parameters
+    ----------
+    e1, e2: astropy.units.Quantity
+        Energies of the two points.
+    v1, v2: astropy.units.Quantity
+        Values at e1 and e2.
+    """
+
+    def __init__(self, e1, v1, e2, v2):
+        self.e1, self.v1, self.e2, self.v2 = e1, v1, e2, v2
+        self.index = float(np.log((v2 / v1).decompose().value) / np.log((e2 / e1).decompose().value))
+
+    def __call__(self, e):
+        """Value at the energy (or energies) e."""
+        return self.v1 * np.power((e / self.e1).decompose().value, self.index)
+
+    def __repr__(self):
+        return f"EnergyPowerLaw({self.v1} at {self.e1}, {self.v2} at {self.e2}; index {self.index:.3f})"
+
+
+def at_energy(value, e):
+    """
+    Value of a quantity that may depend on energy: value(e) if it is
+    callable (e.g. an EnergyPowerLaw), value itself otherwise.
+    """
+    return value(e) if callable(value) else value
+
+
 def polar_neighbourhood(x, y, x0, y0, index, max_dphi, max_dr, max_dist=0*u.deg):
     """
     Pixels in the polar neighbourhood of one pixel, used for the
@@ -1545,14 +1580,16 @@ f"""{type(self).__name__} instance
             Result of fit_camera_response(), see posterior_counts().
         prior_strength: float or array_like
             Prior weight, see posterior_counts().
-        max_dphi: astropy.units.Quantity
+        max_dphi: astropy.units.Quantity or EnergyPowerLaw
             Maximal azimuth difference, seen from the model center, of
-            the pixels averaged together. Defaults to 10 deg.
-        max_dr: astropy.units.Quantity
+            the pixels averaged together, or its dependence on energy,
+            evaluated at each energy bin's center energy (see
+            at_energy()). Defaults to 10 deg.
+        max_dr: astropy.units.Quantity or EnergyPowerLaw
             Maximal difference in radial distance from the model center
             of the pixels averaged together, counted as negative across
             the peak (see polar_neighbourhood()). Defaults to 0.25 deg.
-        max_dist: astropy.units.Quantity
+        max_dist: astropy.units.Quantity or EnergyPowerLaw
             Distance between pixel centers within which pixels are
             always averaged together, whatever max_dphi and max_dr
             (see polar_neighbourhood()). Defaults to 0.25 deg.
@@ -1617,14 +1654,20 @@ f"""{type(self).__name__} instance
         """
         polar_moving_average() of each of the given energy bins' maps
         (values, of shape (len(energy_bins), nx, ny)), around the model
-        center of that bin (see _bin_centers()).
+        center of that bin (see _bin_centers()), with the neighbourhood
+        limits at that bin's center energy (see at_energy()).
         """
         x = (self.xedges[1:] + self.xedges[:-1]) / 2
         y = (self.yedges[1:] + self.yedges[:-1]) / 2
         x0, y0 = self._bin_centers(result, energy_bins)
+        e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1])[energy_bins]
 
         return u.Quantity([
-            polar_moving_average(values[i], x, y, x0[i], y0[i], max_dphi, max_dr, max_dist, weights=weights)
+            polar_moving_average(
+                values[i], x, y, x0[i], y0[i],
+                at_energy(max_dphi, e[i]), at_energy(max_dr, e[i]), at_energy(max_dist, e[i]),
+                weights=weights
+            )
             for i in range(len(energy_bins))
         ])
 
@@ -1728,7 +1771,9 @@ f"""{type(self).__name__} instance
         (see polar_neighbourhood()) for example pixels: the pixels
         averaged together are filled, the example pixel is outlined,
         and the polar (max_dphi, max_dr) and distance (max_dist)
-        limits are drawn as dashed lines around it.
+        limits are drawn as dashed lines around it. Energy-dependent
+        limits (see at_energy()) are taken at the energy of the counts
+        shown, or at e_lo.
 
         The fitted camera_response() spatial distribution is overlaid
         as its sigma ellipse (semi-axes sigma / sqrt(1 - ecc) and
@@ -1770,12 +1815,18 @@ f"""{type(self).__name__} instance
         from matplotlib.patches import Circle, Ellipse, Rectangle, Wedge
 
         # The neighbourhoods are drawn around the model center at the
-        # energy of the counts shown, or at e_lo without counts.
+        # energy of the counts shown, or at e_lo without counts, with
+        # the neighbourhood limits at that energy.
         if energy_bin_id is not None:
             x0, y0 = self._bin_centers(result, [energy_bin_id])
             x0, y0 = x0[0], y0[0]
+            e_limits = np.sqrt(self.energy_edges[energy_bin_id] * self.energy_edges[energy_bin_id + 1])
         else:
             x0, y0 = self._model_center(result, camera_response_params(result)['e_lo'])
+            e_limits = camera_response_params(result)['e_lo'] * u.TeV
+        max_dphi = at_energy(max_dphi, e_limits)
+        max_dr = at_energy(max_dr, e_limits)
+        max_dist = at_energy(max_dist, e_limits)
         x = (self.xedges[1:] + self.xedges[:-1]) / 2
         y = (self.yedges[1:] + self.yedges[:-1]) / 2
         xx, yy = np.meshgrid(x.to_value(u.deg), y.to_value(u.deg), indexing='ij')
@@ -1915,8 +1966,9 @@ f"""{type(self).__name__} instance
                     label=f'Sigma ellipse at {e:.2f} ({semi_major:.2f} x {semi_minor:.2f}, '
                           f'phi = {phi:+.2f} rad, p = {p:.2f})')
 
-        ax.plot([], [], '--', color='gray', label=f'|dphi| <= {max_dphi.to_value(u.deg):g} deg, |dr| <= {max_dr.to_value(u.deg):g} deg')
-        ax.plot([], [], ':', color='gray', label=f'distance <= {max_dist.to_value(u.deg):g} deg')
+        ax.plot([], [], '--', color='gray', label=f'|dphi| <= {max_dphi.to_value(u.deg):.3g} deg, '
+                                                    f'|dr| <= {max_dr.to_value(u.deg):.3g} deg (at {e_limits.to(u.TeV):.3g})')
+        ax.plot([], [], ':', color='gray', label=f'distance <= {max_dist.to_value(u.deg):.3g} deg')
 
         ax.set_xlim(xedges[0], xedges[-1])
         ax.set_ylim(yedges[0], yedges[-1])

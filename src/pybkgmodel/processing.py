@@ -21,7 +21,7 @@ from pybkgmodel.model import (WobbleMap,
                               ExclusionMap
                             )
 from pybkgmodel.camera import (RectangularCameraImage, CAMERA_RESPONSE_PARAM_NAMES,
-                               MAX_ECCENTRICITY, MAX_ASYMMETRY, super_gaussian)
+                               MAX_ECCENTRICITY, MAX_ASYMMETRY, super_gaussian, EnergyPowerLaw)
 
 # Order of the camera_response() fit parameters, as expected by
 # CameraImage.fit_camera_response() / fitted_differential_rate(), see
@@ -361,13 +361,17 @@ def posterior_prior_strength(bkg_map):
 # averaged together, then corrected with the fitted model
 # shape and renormalized to the posterior total per energy bin (see
 # CameraImage.smoothed_posterior_rate()).
-SMOOTHING_MAX_DPHI = 10 * u.deg
-SMOOTHING_MAX_DR = 0.25 * u.deg
+# The limits grow with energy as power laws (evaluated at each energy
+# bin's center energy, extrapolated outside of 0.4-50 TeV): the counts
+# per pixel fall with energy, so higher energies need wider averages,
+# while low energies, with many counts, keep their finer structure.
+SMOOTHING_MAX_DPHI = EnergyPowerLaw(0.4 * u.TeV, 5 * u.deg, 50 * u.TeV, 25 * u.deg)
+SMOOTHING_MAX_DR = EnergyPowerLaw(0.4 * u.TeV, 0.1 * u.deg, 50 * u.TeV, 0.6 * u.deg)
 # Pixels whose centers are within this distance of each other are
 # always averaged together, whatever their azimuth and radial distance.
 # This keeps the neighbourhood from shrinking to a thin sliver near the
 # model center, which otherwise leaves a radial pattern there.
-SMOOTHING_MAX_DIST = 0.25 * u.deg
+SMOOTHING_MAX_DIST = EnergyPowerLaw(0.4 * u.TeV, 0.1 * u.deg, 50 * u.TeV, 0.6 * u.deg)
 
 # Energy bins below the count peak holding less than this fraction of
 # its counts (near and below the energy threshold) depart from the
