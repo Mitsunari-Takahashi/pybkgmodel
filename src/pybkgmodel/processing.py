@@ -377,8 +377,9 @@ SMOOTHING_MAX_DIST = EnergyPowerLaw(0.4 * u.TeV, 0.2 * u.deg, 50 * u.TeV, 0.6 * 
 # its counts (near and below the energy threshold) depart from the
 # fitted shape: their background model is the observed rate smoothed
 # alone, without the fit (see CameraImage.smoothed_posterior_rate()).
-# The bins below the peak holding at least this fraction are fit each
-# on its own (see CameraImage.fit_single_bins()).
+# The peak bin and the bins below it holding at least this fraction are
+# fit each on its own (see CameraImage.fit_single_bins()); the global
+# fit uses the bins above the peak.
 DATA_SMOOTHING_PEAK_FRACTION = 0.1
 
 # Minimal pixel width of the residual panel of the fit check plots (see
@@ -785,7 +786,7 @@ class BkgMakerBase:
         In the low-count energy bins below the count peak (less than
         DATA_SMOOTHING_PEAK_FRACTION of its counts), the observed rate is
         smoothed alone instead, without the fit; the other bins below
-        the peak are fit each on its own first (see
+        the peak, and the peak bin itself, are fit each on its own first (see
         CameraImage.fit_single_bins()).
 
         If the fit succeeded, diagnostic plot images are saved in
@@ -837,8 +838,9 @@ class BkgMakerBase:
                 for name, val in zip(CAMERA_RESPONSE_PARAM_NAMES, fit_result.x):
                     print(f"    {name:12s} = {val: .6g}")
 
-                # Energy bins just above the threshold are fit on their
-                # own (see CameraImage.fit_single_bins()).
+                # Energy bins from just above the threshold up to the
+                # count peak are fit on their own (see
+                # CameraImage.fit_single_bins()).
                 bkg_map.fit_single_bins(fit_result, DATA_SMOOTHING_PEAK_FRACTION)
                 e_edges = bkg_map.energy_edges
                 for i, params in fit_result.single_bin_fits.items():

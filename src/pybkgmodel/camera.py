@@ -1098,12 +1098,14 @@ f"""{type(self).__name__} instance
 
     def single_fit_bins(self, peak_fraction):
         """
-        Energy bins below the bin with the highest total count (in the
-        unmasked pixels), holding at least peak_fraction of its counts:
-        just above the energy threshold, where the spatial distribution
-        departs from the shape of the fitted camera_response() but the
-        counts suffice to fit each bin on its own (see
-        fit_single_bins()).
+        The bin with the highest total count (in the unmasked pixels),
+        and the bins below it holding at least peak_fraction of its
+        counts: just above the energy threshold, where the spatial
+        distribution departs from the shape of the fitted
+        camera_response() but the counts suffice to fit each bin on its
+        own (see fit_single_bins()). The peak bin is among them, as in
+        some runs its spatial distribution is not reproduced by the
+        global model either.
 
         Parameters
         ----------
@@ -1119,7 +1121,7 @@ f"""{type(self).__name__} instance
         bin_totals = (self.raw_counts * mask).sum(axis=(1, 2))
         peak_bin = np.argmax(bin_totals)
 
-        return ((np.arange(len(bin_totals)) < peak_bin)
+        return ((np.arange(len(bin_totals)) <= peak_bin)
                 & (bin_totals >= peak_fraction * bin_totals[peak_bin]) & (bin_totals > 0))
 
     def data_only_bins(self, result, peak_fraction):
@@ -1152,11 +1154,14 @@ f"""{type(self).__name__} instance
 
     def fit_energy_range(self, min_counts=1000):
         """
-        Energy bins included in fit_camera_response(): the bin with the
-        highest total count (in the unmasked pixels) and all bins above
-        it. Bins below the peak carry little information to constrain
+        Energy bins included in fit_camera_response(): all bins above
+        the bin with the highest total count (in the unmasked pixels).
+        Bins below the peak carry little information to constrain
         the energy-dependent fit parameters and would otherwise just
-        add spurious -model_counts terms to the fit statistic.
+        add spurious -model_counts terms to the fit statistic. The peak
+        bin itself is fit on its own (see single_fit_bins()), as in
+        some runs its spatial distribution departs from the global
+        model; it is only included here if no bin lies above it.
 
         Parameters
         ----------
@@ -1178,17 +1183,19 @@ f"""{type(self).__name__} instance
             range where the data actually constrain the spatial shape
             (a few stray events at the highest energies do not extend
             it). If no included bin has that many counts, both are the
-            peak bin's center.
+            center of the lowest included bin.
         """
         mask = np.broadcast_to(self.mask, self.raw_counts.shape)
         bin_totals = (self.raw_counts * mask).sum(axis=(1, 2))
         peak_bin = np.argmax(bin_totals)
-        in_range = np.arange(len(bin_totals)) >= peak_bin
+        in_range = np.arange(len(bin_totals)) > peak_bin
+        if not in_range.any():
+            in_range[peak_bin] = True
 
         e = np.sqrt(self.energy_edges[1:] * self.energy_edges[:-1]).to_value(u.TeV)
         filled = np.nonzero(in_range & (bin_totals >= min_counts))[0]
         if filled.size == 0:
-            filled = np.array([peak_bin])
+            filled = np.nonzero(in_range)[0][:1]
 
         return in_range, e[filled[0]], e[filled[-1]]
 
@@ -1280,7 +1287,7 @@ f"""{type(self).__name__} instance
         # left by the smooth log_parabola energy shape not perfectly
         # tracking the true spectrum bin-by-bin, while leaving the
         # fitted spatial shape untouched. Uses the full pixel mask
-        # (not the fit's additional peak-and-above energy restriction
+        # (not the fit's additional above-the-peak energy restriction
         # above), so every energy bin is normalized this way.
         mask_full = np.broadcast_to(self.mask, counts.shape)
         data_sum = (counts * mask_full).sum(axis=(1, 2))
@@ -1300,8 +1307,8 @@ f"""{type(self).__name__} instance
 
     def fit_single_bins(self, result, peak_fraction):
         """
-        Fit the energy bins just above the energy threshold (see
-        single_fit_bins()) each on its own, with an elliptical,
+        Fit the energy bins just above the energy threshold, up to the
+        count peak (see single_fit_bins()), each on its own, with an elliptical,
         possibly asymmetric super-Gaussian (see single_bin_response()),
         and replace the model of fit_camera_response() in these bins
         with it. The global model, which does not include these bins in
@@ -2330,6 +2337,9 @@ f"""{type(self).__name__} instance
             data_only = self.data_only_bins(result, data_peak_fraction)
         single_fit = np.zeros_like(fitted)
         single_fit[list(getattr(result, 'single_bin_fits', {}))] = True
+        # The peak bin is in the global fit only if no bin lies above
+        # it (see fit_energy_range()); a single-bin fit replaces it.
+        fitted = fitted & ~single_fit
 
         for sel, fmt, mfc, label in (
             (fitted, 'o', 'k', 'Data (fitted)'),
